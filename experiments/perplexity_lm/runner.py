@@ -167,7 +167,7 @@ class SparsePerplexityEvaluator:
         """
         Evaluate using KV cache pruning - matches published H2O/StreamingLLM methodology.
         """
-        import torch.nn.functional as F
+        from transformers import DynamicCache
         
         B, seq_len = input_ids.shape
         
@@ -178,7 +178,6 @@ class SparsePerplexityEvaluator:
         
         # Sink tokens (first 4) and recent window
         sink_size = 4
-        recent_size = max_cache_size - sink_size
         
         total_loss = 0.0
         num_tokens = 0
@@ -205,7 +204,11 @@ class SparsePerplexityEvaluator:
             past_key_values = outputs.past_key_values
             
             if past_key_values is not None:
-                cache_len = past_key_values[0][0].shape[2]
+                # Get cache length - handle both DynamicCache and tuple formats
+                if hasattr(past_key_values, 'get_seq_length'):
+                    cache_len = past_key_values.get_seq_length()
+                else:
+                    cache_len = past_key_values[0][0].shape[2]
                 
                 if cache_len > max_cache_size:
                     past_key_values = self._prune_kv_cache_for_eval(
@@ -230,11 +233,26 @@ class SparsePerplexityEvaluator:
         CAB V4: Hybrid magnitude + uniqueness
         StreamingLLM: Sinks + recent window
         """
-        # Get current cache length
-        cache_len = past_key_values[0][0].shape[2]
+        from transformers import DynamicCache
+        
+        # Handle DynamicCache vs tuple format
+        if hasattr(past_key_values, 'key_cache'):
+            # DynamicCache format
+            key_cache = past_key_values.key_cache
+            value_cache = past_key_values.value_cache
+            is_dynamic_cache = True
+        else:
+            # Tuple format
+            key_cache = [layer_kv[0] for layer_kv in past_key_values]
+            value_cache = [layer_kv[1] for layer_kv in past_key_values]
+            is_dynamic_cache = False
+        
+        cache_len = key_cache[0].shape[2]
         
         if cache_len <= max_size:
             return past_key_values
+        
+        device = key_cache[0].device
         
         # Indices to keep
         if self.method == "streaming_llm":
@@ -242,11 +260,10 @@ class SparsePerplexityEvaluator:
             keep_indices = list(range(sink_size))
             recent_start = max(sink_size, cache_len - (max_size - sink_size))
             keep_indices.extend(range(recent_start, cache_len))
-            keep_indices = torch.tensor(keep_indices[:max_size], device=past_key_values[0][0].device)
+            keep_indices = torch.tensor(keep_indices[:max_size], device=device)
         else:
             # H2O / CAB V4: Score by importance, keep top-K
-            # Use first layer's keys for scoring (efficient approximation)
-            keys = past_key_values[0][0]  # [B, H, cache_len, D]
+            keys = key_cache[0]  # [B, H, cache_len, D]
             
             if self.method == "h2o":
                 # H2O: L2 norm
@@ -268,8 +285,8 @@ class SparsePerplexityEvaluator:
                 
                 importance = 0.5 * mag_norm + 0.5 * uniq_norm
             
-            # Always keep sinks, then top-K from rest
-            sink_indices = torch.arange(sink_size, device=importance.device)
+            # Keep sinks + top-K from rest
+            sink_indices = torch.arange(sink_size, device=device)
             
             remaining_budget = max_size - sink_size
             remaining_importance = importance[sink_size:]
@@ -278,15 +295,14 @@ class SparsePerplexityEvaluator:
             
             keep_indices = torch.cat([sink_indices, top_remaining.sort().values])
         
-        # Prune each layer
-        pruned_kv = []
-        for layer_kv in past_key_values:
-            key, value = layer_kv
-            pruned_key = key[:, :, keep_indices, :]
-            pruned_value = value[:, :, keep_indices, :]
-            pruned_kv.append((pruned_key, pruned_value))
+        # Prune each layer and create new DynamicCache
+        new_cache = DynamicCache()
+        for layer_idx in range(len(key_cache)):
+            pruned_key = key_cache[layer_idx][:, :, keep_indices, :]
+            pruned_value = value_cache[layer_idx][:, :, keep_indices, :]
+            new_cache.update(pruned_key, pruned_value, layer_idx)
         
-        return tuple(pruned_kv)
+        return new_cache
     
     @torch.no_grad()
     def evaluate_dataset(
