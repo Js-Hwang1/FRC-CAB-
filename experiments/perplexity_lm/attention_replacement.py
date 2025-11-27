@@ -287,17 +287,12 @@ class H2OAttention(BaseSparseAttention):
     https://arxiv.org/abs/2306.14048
     
     Key insight: A small portion of tokens (heavy hitters) contribute most to attention.
-    Selection criterion: Cumulative attention score (L2 norm of key as proxy).
+    Selection criterion: L2 norm of keys as proxy for attention magnitude.
     
-    For perplexity evaluation, we also keep:
-    - Sink tokens (first few positions) - critical for attention patterns
-    - Recent window - ensures each query has nearby context
+    This implements the EXACT H2O algorithm:
+    - Select top-K keys by L2 norm (heavy hitters)
+    - Apply to all queries (global selection, not per-query)
     """
-    
-    def __init__(self, *args, n_sink: int = 4, n_recent: int = 64, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.n_sink = n_sink
-        self.n_recent = n_recent
     
     def compute_attention(
         self,
@@ -306,77 +301,54 @@ class H2OAttention(BaseSparseAttention):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """H2O attention with heavy hitter selection + sinks + recent."""
+        """H2O attention with heavy hitter selection (exact algorithm)."""
         B, H, N, D = q.shape
         _, _, M, _ = k.shape
         
         scale = 1.0 / math.sqrt(D)
         
-        # Compute full attention scores
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+        # H2O: Select heavy hitters based on L2 norm of keys
+        key_importance = k.norm(dim=-1)  # [B, H, M]
         
-        # Apply causal mask first
-        causal_mask = torch.triu(
-            torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
-            diagonal=1
-        )
-        attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
+        # Determine number of tokens to keep
+        keep_ratio = 1.0 - self.sparsity
+        num_keep = max(4, int(M * keep_ratio))
+        
+        if num_keep < M:
+            # Get top-k indices per head (global selection)
+            _, top_indices = torch.topk(key_importance, k=num_keep, dim=-1)  # [B, H, num_keep]
+            
+            # Gather selected keys and values
+            top_indices_k = top_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # [B, H, num_keep, D]
+            k_selected = torch.gather(k, 2, top_indices_k)  # [B, H, num_keep, D]
+            v_selected = torch.gather(v, 2, top_indices_k)  # [B, H, num_keep, D]
+            
+            # Compute attention only on selected keys
+            attn_weights = torch.matmul(q, k_selected.transpose(-2, -1)) * scale  # [B, H, N, num_keep]
+            
+            # Create causal mask for selected positions
+            # For each query i, mask out selected keys with position > i
+            positions = torch.arange(N, device=q.device).unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # [1, 1, N, 1]
+            selected_positions = top_indices.unsqueeze(2)  # [B, H, 1, num_keep]
+            causal_mask = (selected_positions > positions).float() * float('-inf')  # [B, H, N, num_keep]
+            attn_weights = attn_weights + causal_mask
+        else:
+            # Dense attention with causal mask
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+            causal_mask = torch.triu(
+                torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
+                diagonal=1
+            )
+            attn_weights = attn_weights + causal_mask
+            v_selected = v
         
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
         
-        # H2O: Select heavy hitters + sinks + recent
-        keep_ratio = 1.0 - self.sparsity
-        total_keep = max(4, int(M * keep_ratio))
-        
-        if total_keep < M:
-            # Build per-query mask that respects causality
-            # For each query position i, keep: sinks + recent + top-K from remaining
-            sparse_mask = torch.full((B, H, N, M), float('-inf'), device=q.device, dtype=q.dtype)
-            
-            # Key importance (L2 norm)
-            key_importance = k.norm(dim=-1)  # [B, H, M]
-            
-            for i in range(N):
-                # For query i, can only attend to positions 0..i
-                causal_len = i + 1
-                
-                if causal_len <= total_keep:
-                    # Keep all positions in causal range
-                    sparse_mask[:, :, i, :causal_len] = 0.0
-                else:
-                    # Always keep sink tokens (first n_sink)
-                    n_sink = min(self.n_sink, causal_len)
-                    sparse_mask[:, :, i, :n_sink] = 0.0
-                    
-                    # Always keep recent tokens (last n_recent before position i)
-                    n_recent = min(self.n_recent, causal_len - n_sink)
-                    if n_recent > 0:
-                        sparse_mask[:, :, i, causal_len - n_recent:causal_len] = 0.0
-                    
-                    # For remaining budget, select by importance
-                    remaining_budget = total_keep - n_sink - n_recent
-                    if remaining_budget > 0:
-                        # Get importance of middle tokens (between sink and recent)
-                        middle_start = n_sink
-                        middle_end = causal_len - n_recent
-                        if middle_end > middle_start:
-                            middle_importance = key_importance[:, :, middle_start:middle_end]
-                            n_middle_keep = min(remaining_budget, middle_end - middle_start)
-                            _, top_idx = torch.topk(middle_importance, k=n_middle_keep, dim=-1)
-                            top_idx = top_idx + middle_start  # Offset to global position
-                            
-                            # Unmask selected positions
-                            for b in range(B):
-                                for h in range(H):
-                                    sparse_mask[b, h, i, top_idx[b, h]] = 0.0
-            
-            attn_weights = attn_weights + sparse_mask
-        
         # Softmax and value aggregation
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
         
-        return torch.matmul(attn_weights, v)
+        return torch.matmul(attn_weights, v_selected)
 
 
 # =============================================================================
@@ -390,18 +362,16 @@ class CABV4Attention(BaseSparseAttention):
     Uses Forman-Ricci Curvature to identify topologically important tokens.
     Hybrid selection: 50% magnitude + 50% FRC-based uniqueness.
     
-    For perplexity evaluation, we also keep:
-    - Sink tokens (first few positions) - critical for attention patterns
-    - Recent window - ensures each query has nearby context
+    This implements the EXACT CAB V4 algorithm:
+    - Compute hybrid importance (magnitude + uniqueness)
+    - Select top-K globally
+    - Apply to all queries with causal masking
     """
     
-    def __init__(self, *args, magnitude_ratio: float = 0.5, block_size: int = 64, 
-                 n_sink: int = 4, n_recent: int = 64, **kwargs):
+    def __init__(self, *args, magnitude_ratio: float = 0.5, block_size: int = 64, **kwargs):
         super().__init__(*args, **kwargs)
         self.magnitude_ratio = magnitude_ratio
         self.block_size = block_size
-        self.n_sink = n_sink
-        self.n_recent = n_recent
         
         # Try to import actual CAB predictor
         try:
@@ -423,71 +393,52 @@ class CABV4Attention(BaseSparseAttention):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """CAB V4 attention with hybrid importance + sinks + recent."""
+        """CAB V4 attention with hybrid importance (exact algorithm)."""
         B, H, N, D = q.shape
         _, _, M, _ = k.shape
         
         scale = 1.0 / math.sqrt(D)
         
-        # Compute full attention scores
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+        # CAB V4: Compute hybrid importance
+        importance = self._compute_cab_importance(k)  # [B, H, M]
         
-        # Apply causal mask
-        causal_mask = torch.triu(
-            torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
-            diagonal=1
-        )
-        attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
+        # Determine number of tokens to keep
+        keep_ratio = 1.0 - self.sparsity
+        num_keep = max(4, int(M * keep_ratio))
+        
+        if num_keep < M:
+            # Get top-k indices per head (global selection)
+            _, top_indices = torch.topk(importance, k=num_keep, dim=-1)  # [B, H, num_keep]
+            
+            # Gather selected keys and values
+            top_indices_k = top_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # [B, H, num_keep, D]
+            k_selected = torch.gather(k, 2, top_indices_k)  # [B, H, num_keep, D]
+            v_selected = torch.gather(v, 2, top_indices_k)  # [B, H, num_keep, D]
+            
+            # Compute attention only on selected keys
+            attn_weights = torch.matmul(q, k_selected.transpose(-2, -1)) * scale  # [B, H, N, num_keep]
+            
+            # Create causal mask for selected positions
+            positions = torch.arange(N, device=q.device).unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # [1, 1, N, 1]
+            selected_positions = top_indices.unsqueeze(2)  # [B, H, 1, num_keep]
+            causal_mask = (selected_positions > positions).float() * float('-inf')  # [B, H, N, num_keep]
+            attn_weights = attn_weights + causal_mask
+        else:
+            # Dense attention with causal mask
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+            causal_mask = torch.triu(
+                torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
+                diagonal=1
+            )
+            attn_weights = attn_weights + causal_mask
+            v_selected = v
         
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
         
-        # CAB V4: Hybrid selection with sinks + recent
-        keep_ratio = 1.0 - self.sparsity
-        total_keep = max(4, int(M * keep_ratio))
-        
-        if total_keep < M:
-            # Compute CAB importance
-            importance = self._compute_cab_importance(k)
-            
-            # Build per-query mask respecting causality
-            sparse_mask = torch.full((B, H, N, M), float('-inf'), device=q.device, dtype=q.dtype)
-            
-            for i in range(N):
-                causal_len = i + 1
-                
-                if causal_len <= total_keep:
-                    sparse_mask[:, :, i, :causal_len] = 0.0
-                else:
-                    # Always keep sink tokens
-                    n_sink = min(self.n_sink, causal_len)
-                    sparse_mask[:, :, i, :n_sink] = 0.0
-                    
-                    # Always keep recent tokens
-                    n_recent = min(self.n_recent, causal_len - n_sink)
-                    if n_recent > 0:
-                        sparse_mask[:, :, i, causal_len - n_recent:causal_len] = 0.0
-                    
-                    # Select by CAB importance from middle tokens
-                    remaining_budget = total_keep - n_sink - n_recent
-                    if remaining_budget > 0:
-                        middle_start = n_sink
-                        middle_end = causal_len - n_recent
-                        if middle_end > middle_start:
-                            middle_importance = importance[:, :, middle_start:middle_end]
-                            n_middle_keep = min(remaining_budget, middle_end - middle_start)
-                            _, top_idx = torch.topk(middle_importance, k=n_middle_keep, dim=-1)
-                            top_idx = top_idx + middle_start
-                            
-                            for b in range(B):
-                                for h in range(H):
-                                    sparse_mask[b, h, i, top_idx[b, h]] = 0.0
-            
-            attn_weights = attn_weights + sparse_mask
-        
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
         
-        return torch.matmul(attn_weights, v)
+        return torch.matmul(attn_weights, v_selected)
     
     def _compute_cab_importance(self, k: torch.Tensor) -> torch.Tensor:
         """
