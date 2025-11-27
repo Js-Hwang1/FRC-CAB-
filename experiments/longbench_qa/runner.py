@@ -262,6 +262,9 @@ class ModelWrapper:
         context: str,
         question: str,
         max_new_tokens: int = None,
+        sparse_method: str = "dense",
+        sparsity: float = 0.0,
+        magnitude_ratio: float = 0.5,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate response for a question given context.
@@ -270,6 +273,9 @@ class ModelWrapper:
             context: Long context
             question: Question to answer
             max_new_tokens: Max tokens to generate
+            sparse_method: "dense", "h2o", "cab_v4", "random"
+            sparsity: Fraction of attention to prune (0.0 = dense, 0.9 = keep 10%)
+            magnitude_ratio: For CAB V4, ratio of magnitude vs FRC
         
         Returns:
             prediction: Generated text
@@ -292,16 +298,27 @@ class ModelWrapper:
         )
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         
-        # Generate
+        # Generate with sparse attention via KV cache pruning
         start_time = time.time()
         
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
+        if sparse_method == "dense" or sparsity == 0:
+            # Standard generation
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=self.config.temperature if self.config.do_sample else None,
+                    do_sample=self.config.do_sample,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+        else:
+            # Sparse generation with KV cache pruning
+            outputs = self._sparse_generate(
+                inputs,
                 max_new_tokens=max_new_tokens,
-                temperature=self.config.temperature if self.config.do_sample else None,
-                do_sample=self.config.do_sample,
-                pad_token_id=self.tokenizer.pad_token_id,
+                method=sparse_method,
+                sparsity=sparsity,
+                magnitude_ratio=magnitude_ratio,
             )
         
         generation_time = (time.time() - start_time) * 1000  # ms
@@ -390,6 +407,170 @@ Question: {question}
 Answer:"""
         
         return prompt
+    
+    def _sparse_generate(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        max_new_tokens: int,
+        method: str,
+        sparsity: float,
+        magnitude_ratio: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Generate with sparse attention via KV cache pruning.
+        
+        This actually applies sparse attention by pruning the KV cache
+        to keep only the most important tokens.
+        """
+        device = inputs['input_ids'].device
+        batch_size = inputs['input_ids'].shape[0]
+        num_keep_ratio = 1.0 - sparsity
+        
+        # Initial forward pass to get KV cache
+        with torch.no_grad():
+            outputs = self.model(
+                **inputs,
+                use_cache=True,
+                return_dict=True,
+            )
+        
+        past_key_values = outputs.past_key_values
+        next_token_logits = outputs.logits[:, -1, :]
+        
+        # Prune initial KV cache
+        past_key_values = self._prune_kv_cache(
+            past_key_values, num_keep_ratio, method, magnitude_ratio
+        )
+        
+        # Generate tokens one by one
+        generated_ids = inputs['input_ids'].clone()
+        
+        for step in range(max_new_tokens):
+            # Get next token (greedy)
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+            
+            # Check for EOS
+            if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id is not None:
+                if (next_token == self.tokenizer.eos_token_id).all():
+                    break
+            
+            # Forward pass with pruned cache
+            cache_len = past_key_values[0][0].shape[2] if past_key_values else 0
+            position_ids = torch.tensor([[cache_len]], device=device)
+            
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=next_token,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+            
+            past_key_values = outputs.past_key_values
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # Prune cache periodically (every 5 tokens to balance speed/sparsity)
+            if (step + 1) % 5 == 0:
+                past_key_values = self._prune_kv_cache(
+                    past_key_values, num_keep_ratio, method, magnitude_ratio
+                )
+        
+        return generated_ids
+    
+    def _prune_kv_cache(
+        self,
+        past_key_values: Tuple,
+        keep_ratio: float,
+        method: str,
+        magnitude_ratio: float = 0.5,
+    ) -> Tuple:
+        """
+        Prune KV cache to keep only important tokens.
+        
+        Args:
+            past_key_values: Tuple of (key, value) per layer
+            keep_ratio: Fraction of tokens to keep (e.g., 0.1 for 90% sparsity)
+            method: "h2o" or "cab_v4"
+            magnitude_ratio: For CAB V4
+        
+        Returns:
+            Pruned past_key_values
+        """
+        if past_key_values is None or keep_ratio >= 1.0:
+            return past_key_values
+        
+        pruned_kvs = []
+        
+        for layer_idx, kv in enumerate(past_key_values):
+            # Handle different cache formats
+            if hasattr(kv, 'key_cache'):
+                # DynamicCache format
+                key = kv.key_cache
+                value = kv.value_cache
+            else:
+                # Tuple format
+                key, value = kv
+            
+            B, H, N, D = key.shape
+            num_keep = max(4, int(N * keep_ratio))  # Keep at least 4 tokens
+            
+            if N <= num_keep:
+                pruned_kvs.append(kv)
+                continue
+            
+            # Compute importance scores
+            if method == "h2o":
+                # H2O: Use L2 norm of key vectors as importance
+                importance = key.norm(dim=-1)  # [B, H, N]
+            
+            elif method == "cab_v4":
+                # CAB V4: Hybrid of magnitude + uniqueness
+                magnitude = key.norm(dim=-1)  # [B, H, N]
+                
+                # Compute uniqueness (inverse of redundancy)
+                k_norm = F.normalize(key, dim=-1)
+                # Similarity to other keys
+                sim = torch.matmul(k_norm, k_norm.transpose(-2, -1))  # [B, H, N, N]
+                redundancy = sim.mean(dim=-1)  # [B, H, N]
+                uniqueness = 1.0 - redundancy
+                
+                # Normalize both to [0, 1] range
+                mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
+                uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
+                
+                # Combine
+                importance = magnitude_ratio * mag_norm + (1 - magnitude_ratio) * uniq_norm
+            
+            elif method == "streaming_llm":
+                # Keep first 4 tokens (sinks) and last tokens
+                importance = torch.zeros(B, H, N, device=key.device)
+                importance[:, :, :4] = 1e6  # Always keep sinks
+                importance[:, :, -num_keep+4:] = torch.arange(num_keep-4, device=key.device).float()
+            
+            else:  # random
+                importance = torch.rand(B, H, N, device=key.device)
+            
+            # Get top-k indices
+            _, top_indices = torch.topk(importance, k=num_keep, dim=-1)  # [B, H, num_keep]
+            
+            # Sort to maintain order
+            top_indices, _ = torch.sort(top_indices, dim=-1)
+            
+            # Gather pruned keys and values
+            top_indices_expanded = top_indices.unsqueeze(-1).expand(-1, -1, -1, D)
+            pruned_key = torch.gather(key, 2, top_indices_expanded)
+            pruned_value = torch.gather(value, 2, top_indices_expanded)
+            
+            # Return in same format as input
+            if hasattr(kv, 'key_cache'):
+                # DynamicCache - need to create new cache object
+                # For simplicity, return tuple format
+                pruned_kvs.append((pruned_key, pruned_value))
+            else:
+                pruned_kvs.append((pruned_key, pruned_value))
+        
+        return tuple(pruned_kvs)
     
     def get_attention_weights(
         self,
@@ -591,10 +772,18 @@ class BenchmarkRunner:
     ) -> SampleResult:
         """Evaluate a single sample with a method."""
         
-        # Generate prediction
+        # Get sparse attention parameters from method
+        method_name = method.config.name.value if hasattr(method.config.name, 'value') else method.config.name
+        sparsity = method.config.sparsity
+        magnitude_ratio = getattr(method.config, 'magnitude_ratio', 0.5)
+        
+        # Generate prediction with sparse attention
         prediction, gen_diagnostics = self.model_wrapper.generate(
             context=sample.context,
             question=sample.question,
+            sparse_method=method_name,
+            sparsity=sparsity,
+            magnitude_ratio=magnitude_ratio,
         )
         
         # Compute metrics
