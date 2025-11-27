@@ -248,24 +248,15 @@ class BaseSparseAttention(nn.Module):
         # Apply output projection
         output = self._apply_output_projection(attn_output)
         
-        # Return format depends on transformers version and attention class
-        # Modern versions (4.36+): always return (output, weights, cache)
-        # Older versions: return varies based on flags
+        # LlamaAttention return format:
+        # - use_cache=False: return (output, attn_weights)  <- 2 values
+        # - use_cache=True: return (output, attn_weights, past_key_value)  <- 3 values
         attn_weights = None  # We don't compute explicit attention weights
         
-        # Check if original attention has specific return format hints
-        if hasattr(self.original_attention, '__class__'):
-            attn_class_name = self.original_attention.__class__.__name__
-            # SDPA and Flash attention have different return formats
-            if 'Sdpa' in attn_class_name or 'Flash' in attn_class_name:
-                # These typically return (output, None, cache) or just (output,)
-                if use_cache:
-                    return output, None, new_past_key_value
-                else:
-                    return output, None, None
-        
-        # Default: match standard LlamaAttention format (3 values always)
-        return output, attn_weights, new_past_key_value
+        if use_cache:
+            return output, attn_weights, new_past_key_value
+        else:
+            return output, attn_weights
 
 
 # =============================================================================
