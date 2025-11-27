@@ -17,9 +17,15 @@ ICML Submission Grade Implementation.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import math
 import logging
+
+try:
+    import transformers
+    TRANSFORMERS_VERSION = tuple(int(x) for x in transformers.__version__.split('.')[:2])
+except:
+    TRANSFORMERS_VERSION = (4, 40)  # Default to recent behavior
 
 logger = logging.getLogger(__name__)
 
@@ -236,12 +242,23 @@ class BaseSparseAttention(nn.Module):
         # Apply output projection
         output = self._apply_output_projection(attn_output)
         
-        # HuggingFace LlamaAttention always returns exactly 3 values:
-        # (attn_output, attn_weights, past_key_value)
-        # Even when output_attentions=False, attn_weights is returned as None
-        # Even when use_cache=False, past_key_value is returned as None
+        # Return format depends on transformers version and attention class
+        # Modern versions (4.36+): always return (output, weights, cache)
+        # Older versions: return varies based on flags
         attn_weights = None  # We don't compute explicit attention weights
         
+        # Check if original attention has specific return format hints
+        if hasattr(self.original_attention, '__class__'):
+            attn_class_name = self.original_attention.__class__.__name__
+            # SDPA and Flash attention have different return formats
+            if 'Sdpa' in attn_class_name or 'Flash' in attn_class_name:
+                # These typically return (output, None, cache) or just (output,)
+                if use_cache:
+                    return output, None, new_past_key_value
+                else:
+                    return output, None, None
+        
+        # Default: match standard LlamaAttention format (3 values always)
         return output, attn_weights, new_past_key_value
 
 
@@ -645,6 +662,13 @@ def replace_attention_layers(
     """
     if method not in ATTENTION_CLASSES:
         raise ValueError(f"Unknown method: {method}. Available: {list(ATTENTION_CLASSES.keys())}")
+    
+    # Force model to use eager attention implementation for consistent behavior
+    # This prevents SDPA/Flash attention from interfering
+    if hasattr(model.config, '_attn_implementation'):
+        model.config._attn_implementation = 'eager'
+    if hasattr(model, 'config') and hasattr(model.config, 'attn_implementation'):
+        model.config.attn_implementation = 'eager'
     
     attn_class = ATTENTION_CLASSES[method]
     info = get_model_attention_info(model)
