@@ -262,38 +262,69 @@ class LongBenchDataset(BaseBenchmarkDataset):
                 lines = f.readlines()
                 return [json.loads(line) for line in lines if line.strip()]
         
-        # Download and extract from data.zip
+        # Download and extract from data.zip with retry logic
         if REQUESTS_AVAILABLE:
-            try:
-                zip_url = f"https://huggingface.co/datasets/{self.HF_DATASET_NAME}/resolve/main/data.zip"
-                print(f"Downloading LongBench data from {zip_url}...")
-                response = requests.get(zip_url, timeout=120)
-                
-                if response.status_code == 200:
-                    # Extract the specific file we need
-                    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
-                        # List files in zip to find the right one
-                        file_list = zf.namelist()
-                        target_file = None
-                        for name in file_list:
-                            if self.config.name in name and name.endswith('.jsonl'):
-                                target_file = name
-                                break
+            zip_url = f"https://huggingface.co/datasets/{self.HF_DATASET_NAME}/resolve/main/data.zip"
+            
+            # Retry with exponential backoff
+            max_retries = 3
+            last_error = None
+            
+            for attempt in range(max_retries):
+                try:
+                    print(f"Downloading LongBench data from {zip_url}... (attempt {attempt + 1}/{max_retries})")
+                    
+                    # Use streaming to handle large files better
+                    response = requests.get(zip_url, timeout=300, stream=True)
+                    
+                    if response.status_code == 200:
+                        # Download in chunks to handle large files
+                        chunks = []
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
                         
-                        if target_file:
-                            # Extract and cache
-                            content = zf.read(target_file).decode('utf-8')
-                            with open(data_file, 'w', encoding='utf-8') as f:
-                                f.write(content)
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                chunks.append(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0 and downloaded % (10 * 1024 * 1024) < 8192:
+                                    print(f"  Downloaded {downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB")
+                        
+                        content = b''.join(chunks)
+                        print(f"Download complete: {len(content) / (1024*1024):.1f} MB")
+                        
+                        # Extract the specific file we need
+                        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                            # List files in zip to find the right one
+                            file_list = zf.namelist()
+                            target_file = None
+                            for name in file_list:
+                                if self.config.name in name and name.endswith('.jsonl'):
+                                    target_file = name
+                                    break
                             
-                            lines = content.strip().split('\n')
-                            return [json.loads(line) for line in lines if line.strip()]
-                        else:
-                            raise RuntimeError(f"Could not find {self.config.name}.jsonl in data.zip. Available: {file_list[:10]}")
-                else:
-                    raise RuntimeError(f"Failed to download data.zip: {response.status_code}")
-            except Exception as e:
-                raise RuntimeError(f"Failed to load LongBench dataset '{self.config.name}': {e}")
+                            if target_file:
+                                # Extract and cache
+                                file_content = zf.read(target_file).decode('utf-8')
+                                with open(data_file, 'w', encoding='utf-8') as f:
+                                    f.write(file_content)
+                                
+                                lines = file_content.strip().split('\n')
+                                return [json.loads(line) for line in lines if line.strip()]
+                            else:
+                                raise RuntimeError(f"Could not find {self.config.name}.jsonl in data.zip. Available: {file_list[:10]}")
+                    else:
+                        raise RuntimeError(f"Failed to download data.zip: HTTP {response.status_code}")
+                        
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt * 5  # 5s, 10s, 20s
+                        print(f"Download failed: {e}. Retrying in {wait_time}s...")
+                        import time
+                        time.sleep(wait_time)
+                    else:
+                        raise RuntimeError(f"Failed to load LongBench dataset '{self.config.name}' after {max_retries} attempts: {last_error}")
         else:
             raise ImportError("requests library required for LongBench: pip install requests")
     

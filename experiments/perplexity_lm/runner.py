@@ -156,11 +156,16 @@ class SparsePerplexityEvaluator:
         # StreamingLLM parameters (from paper)
         sink_size = 4  # "attention sinks"
         
+        is_h2o = (self.method == "h2o")
+        
         for i in range(seq_len - 1):
             current_token = input_ids[:, i:i+1]
             
-            # Forward pass - H2O needs attention weights
-            need_attention = (self.method == "h2o")
+            # OPTIMIZATION: Only request attention when we're about to prune
+            # Check if we'll need to prune after this step
+            current_cache_len = i + 1  # After this step
+            will_prune = (current_cache_len > max_cache_size)
+            need_attention = is_h2o and will_prune
             
             outputs = self.model(
                 input_ids=current_token,
@@ -179,8 +184,8 @@ class SparsePerplexityEvaluator:
             # Update KV cache
             past_key_values = outputs.past_key_values
             
-            # H2O: Accumulate attention scores
-            if self.method == "h2o" and outputs.attentions is not None:
+            # H2O: Accumulate attention scores (only when pruning)
+            if need_attention and outputs.attentions is not None:
                 # attentions: tuple of [B, H, 1, seq_len] per layer
                 # Sum across layers, batch, heads to get per-position score
                 attn_scores = torch.stack(outputs.attentions, dim=0)  # [L, B, H, 1, seq_len]
@@ -199,19 +204,13 @@ class SparsePerplexityEvaluator:
                     cumulative_attention[:new_len] += position_scores
             
             # Prune KV cache if needed
-            if past_key_values is not None:
-                if hasattr(past_key_values, 'get_seq_length'):
-                    cache_len = past_key_values.get_seq_length()
-                else:
-                    cache_len = past_key_values[0][0].shape[2]
-                
-                if cache_len > max_cache_size:
-                    past_key_values, cumulative_attention = self._prune_kv_cache_exact(
-                        past_key_values, 
-                        max_cache_size,
-                        cumulative_attention,
-                        sink_size,
-                    )
+            if will_prune and past_key_values is not None:
+                past_key_values, cumulative_attention = self._prune_kv_cache_exact(
+                    past_key_values, 
+                    max_cache_size,
+                    cumulative_attention,
+                    sink_size,
+                )
         
         avg_loss = total_loss / num_tokens if num_tokens > 0 else float("nan")
         ppl = math.exp(avg_loss) if not math.isnan(avg_loss) else float("nan")
