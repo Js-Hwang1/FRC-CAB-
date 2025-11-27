@@ -289,9 +289,8 @@ class H2OAttention(BaseSparseAttention):
     Key insight: A small portion of tokens (heavy hitters) contribute most to attention.
     Selection criterion: L2 norm of keys as proxy for attention magnitude.
     
-    This implements the EXACT H2O algorithm:
-    - Select top-K keys by L2 norm (heavy hitters)
-    - Apply to all queries (global selection, not per-query)
+    For causal LM perplexity, we use standard attention masking (not gather)
+    to ensure every query position has at least some tokens to attend to.
     """
     
     def compute_attention(
@@ -301,57 +300,46 @@ class H2OAttention(BaseSparseAttention):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """H2O attention with heavy hitter selection (exact algorithm)."""
+        """H2O attention with heavy hitter selection."""
         B, H, N, D = q.shape
         _, _, M, _ = k.shape
         
         scale = 1.0 / math.sqrt(D)
         
-        # H2O: Select heavy hitters based on L2 norm of keys
-        key_importance = k.norm(dim=-1)  # [B, H, M]
+        # Compute full attention scores first
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, N, M]
         
-        # Determine number of tokens to keep
+        # Apply causal mask
+        causal_mask = torch.triu(
+            torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
+            diagonal=1
+        )
+        attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
+        
+        # H2O: Create sparse mask based on key importance (L2 norm)
         keep_ratio = 1.0 - self.sparsity
         num_keep = max(4, int(M * keep_ratio))
         
         if num_keep < M:
-            # Get top-k indices per head (global selection)
+            key_importance = k.norm(dim=-1)  # [B, H, M]
+            
+            # Get top-k indices per head
             _, top_indices = torch.topk(key_importance, k=num_keep, dim=-1)  # [B, H, num_keep]
             
-            # Gather selected keys and values
-            top_indices_k = top_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # [B, H, num_keep, D]
-            k_selected = torch.gather(k, 2, top_indices_k)  # [B, H, num_keep, D]
-            v_selected = torch.gather(v, 2, top_indices_k)  # [B, H, num_keep, D]
+            # Create sparse mask: -inf for non-selected positions
+            sparse_mask = torch.full((B, H, M), float('-inf'), device=q.device, dtype=q.dtype)
+            sparse_mask.scatter_(-1, top_indices, 0.0)
             
-            # Compute attention only on selected keys
-            attn_weights = torch.matmul(q, k_selected.transpose(-2, -1)) * scale  # [B, H, N, num_keep]
-            
-            # Create causal mask for selected positions
-            # For each query i, mask out selected keys with position > i
-            positions = torch.arange(N, device=q.device).unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # [1, 1, N, 1]
-            selected_positions = top_indices.unsqueeze(2)  # [B, H, 1, num_keep]
-            causal_mask = (selected_positions > positions).float() * float('-inf')  # [B, H, N, num_keep]
-            attn_weights = attn_weights + causal_mask
-            
-            # Note: Skip external attention_mask as it's for full sequence, not selected keys
-        else:
-            # Dense attention with causal mask
-            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
-            causal_mask = torch.triu(
-                torch.full((N, M), float('-inf'), device=q.device, dtype=q.dtype),
-                diagonal=1
-            )
-            attn_weights = attn_weights + causal_mask
-            v_selected = v
-            
-            # Apply external attention mask only for dense path
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
+            # Apply sparse mask to all queries
+            attn_weights = attn_weights + sparse_mask.unsqueeze(2)
+        
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
         
         # Softmax and value aggregation
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
         
-        return torch.matmul(attn_weights, v_selected)
+        return torch.matmul(attn_weights, v)
 
 
 # =============================================================================

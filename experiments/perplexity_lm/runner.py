@@ -141,7 +141,11 @@ class SparsePerplexityEvaluator:
         input_ids: torch.Tensor,
     ) -> Tuple[float, float, int]:
         """
-        Evaluate perplexity with sparse attention.
+        Evaluate perplexity using published methodology (KV cache pruning).
+        
+        This matches how H2O, StreamingLLM, etc. evaluate perplexity:
+        - Dense: Standard forward pass
+        - Sparse: Token-by-token with KV cache pruning
         """
         B, N = input_ids.shape
         input_ids = input_ids.to(self.device)
@@ -153,15 +157,136 @@ class SparsePerplexityEvaluator:
             num_tokens = N - 1
             return math.exp(loss), loss, num_tokens
         
-        # Replace attention layers with sparse implementation
-        self._replace_attention()
+        # For sparse methods, use KV cache pruning (published methodology)
+        return self._evaluate_with_kv_pruning(input_ids)
+    
+    def _evaluate_with_kv_pruning(
+        self,
+        input_ids: torch.Tensor,
+    ) -> Tuple[float, float, int]:
+        """
+        Evaluate using KV cache pruning - matches published H2O/StreamingLLM methodology.
+        """
+        import torch.nn.functional as F
         
-        # Standard forward pass with replaced attention
-        outputs = self.model(input_ids=input_ids, labels=input_ids)
-        loss = outputs.loss.item()
-        num_tokens = N - 1
+        B, seq_len = input_ids.shape
         
-        return math.exp(loss), loss, num_tokens
+        # Determine cache size based on sparsity
+        # sparsity=0.9 means keep 10% of tokens
+        keep_ratio = 1.0 - self.sparsity
+        max_cache_size = max(64, int(seq_len * keep_ratio))
+        
+        # Sink tokens (first 4) and recent window
+        sink_size = 4
+        recent_size = max_cache_size - sink_size
+        
+        total_loss = 0.0
+        num_tokens = 0
+        past_key_values = None
+        
+        for i in range(seq_len - 1):
+            current_token = input_ids[:, i:i+1]
+            
+            # Forward pass with KV cache
+            outputs = self.model(
+                input_ids=current_token,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            
+            # Get logits and compute loss for next token
+            logits = outputs.logits[:, -1, :]
+            target = input_ids[:, i+1]
+            loss = F.cross_entropy(logits, target, reduction="sum")
+            total_loss += loss.item()
+            num_tokens += 1
+            
+            # Update and prune KV cache
+            past_key_values = outputs.past_key_values
+            
+            if past_key_values is not None:
+                cache_len = past_key_values[0][0].shape[2]
+                
+                if cache_len > max_cache_size:
+                    past_key_values = self._prune_kv_cache_for_eval(
+                        past_key_values, max_cache_size, sink_size
+                    )
+        
+        avg_loss = total_loss / num_tokens if num_tokens > 0 else float("nan")
+        ppl = math.exp(avg_loss) if not math.isnan(avg_loss) else float("nan")
+        
+        return ppl, avg_loss, num_tokens
+    
+    def _prune_kv_cache_for_eval(
+        self,
+        past_key_values,
+        max_size: int,
+        sink_size: int,
+    ):
+        """
+        Prune KV cache using method-specific importance scoring.
+        
+        H2O: L2 norm of keys
+        CAB V4: Hybrid magnitude + uniqueness
+        StreamingLLM: Sinks + recent window
+        """
+        # Get current cache length
+        cache_len = past_key_values[0][0].shape[2]
+        
+        if cache_len <= max_size:
+            return past_key_values
+        
+        # Indices to keep
+        if self.method == "streaming_llm":
+            # StreamingLLM: Keep sinks + most recent
+            keep_indices = list(range(sink_size))
+            recent_start = max(sink_size, cache_len - (max_size - sink_size))
+            keep_indices.extend(range(recent_start, cache_len))
+            keep_indices = torch.tensor(keep_indices[:max_size], device=past_key_values[0][0].device)
+        else:
+            # H2O / CAB V4: Score by importance, keep top-K
+            # Use first layer's keys for scoring (efficient approximation)
+            keys = past_key_values[0][0]  # [B, H, cache_len, D]
+            
+            if self.method == "h2o":
+                # H2O: L2 norm
+                importance = keys.norm(dim=-1).mean(dim=(0, 1))  # [cache_len]
+            else:  # cab_v4
+                # CAB V4: Hybrid magnitude + uniqueness
+                magnitude = keys.norm(dim=-1).mean(dim=(0, 1))  # [cache_len]
+                
+                # Uniqueness (simplified)
+                keys_flat = keys.mean(dim=(0, 1))  # [cache_len, D]
+                keys_norm = F.normalize(keys_flat, dim=-1)
+                similarity = torch.mm(keys_norm, keys_norm.t())
+                redundancy = similarity.mean(dim=-1)
+                uniqueness = 1.0 - redundancy
+                
+                # Normalize
+                mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
+                uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
+                
+                importance = 0.5 * mag_norm + 0.5 * uniq_norm
+            
+            # Always keep sinks, then top-K from rest
+            sink_indices = torch.arange(sink_size, device=importance.device)
+            
+            remaining_budget = max_size - sink_size
+            remaining_importance = importance[sink_size:]
+            _, top_remaining = torch.topk(remaining_importance, k=min(remaining_budget, len(remaining_importance)))
+            top_remaining = top_remaining + sink_size
+            
+            keep_indices = torch.cat([sink_indices, top_remaining.sort().values])
+        
+        # Prune each layer
+        pruned_kv = []
+        for layer_kv in past_key_values:
+            key, value = layer_kv
+            pruned_key = key[:, :, keep_indices, :]
+            pruned_value = value[:, :, keep_indices, :]
+            pruned_kv.append((pruned_key, pruned_value))
+        
+        return tuple(pruned_kv)
     
     @torch.no_grad()
     def evaluate_dataset(
@@ -172,10 +297,11 @@ class SparsePerplexityEvaluator:
     ) -> PerplexityResult:
         """
         Evaluate perplexity on entire dataset.
+        
+        For sparse methods, uses KV cache pruning (published methodology)
+        instead of attention layer replacement.
         """
-        # Replace attention once at the start
-        if self.method != "dense" and self.sparsity > 0:
-            self._replace_attention()
+        # Note: No attention replacement needed - we use KV cache pruning
         
         total_nll = 0.0
         total_tokens = 0
