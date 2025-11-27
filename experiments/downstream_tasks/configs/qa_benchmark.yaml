@@ -1,0 +1,34 @@
+# Open-Domain QA Benchmark Configuration
+# Focus on TODO 1.4.2 - Open-Domain QA
+
+name: "qa_benchmark"
+description: "Open-Domain QA evaluation (NQ, TriviaQA, SQuAD)"
+
+datasets:
+  - natural_questions
+  - triviaqa
+  - squad_v2
+
+methods:
+  - dense
+  - h2o
+  - cab_v3
+  - cab_v4
+  - streaming_llm
+  - random
+
+sparsity_levels:
+  - 0.5
+  - 0.7
+  - 0.9
+  - 0.95
+
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_length: 8192
+  max_new_tokens: 128
+  torch_dtype: "float16"
+
+max_samples: 300
+save_predictions: true
+

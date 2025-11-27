@@ -302,7 +302,7 @@ class ModelWrapper:
         start_time = time.time()
         
         if sparse_method == "dense" or sparsity == 0:
-            # Standard generation
+            # Standard dense generation
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
@@ -311,20 +311,19 @@ class ModelWrapper:
                     do_sample=self.config.do_sample,
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
+            generated_ids = outputs[0, inputs['input_ids'].shape[1]:]
         else:
             # Sparse generation with KV cache pruning
-            outputs = self._sparse_generate(
+            full_ids = self._sparse_generate(
                 inputs,
                 max_new_tokens=max_new_tokens,
                 method=sparse_method,
                 sparsity=sparsity,
                 magnitude_ratio=magnitude_ratio,
             )
+            generated_ids = full_ids[0, inputs['input_ids'].shape[1]:]
         
         generation_time = (time.time() - start_time) * 1000  # ms
-        
-        # Decode
-        generated_ids = outputs[0, inputs['input_ids'].shape[1]:]
         prediction = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         
         # Clean prediction: take only first line/sentence (stop at newline or "Question:")
@@ -580,39 +579,84 @@ Answer:"""
         magnitude_ratio: float,
         num_keep: int,
     ) -> torch.Tensor:
-        """Compute importance scores for KV cache pruning."""
-        B, H, N, D = key.shape
+        """
+        Compute importance scores for KV cache pruning.
         
-        if method == "h2o":
-            # H2O: Use L2 norm of key vectors as importance
+        All methods return [B, H, N] importance scores where higher = more important.
+        This ensures apple-to-apple fair comparison.
+        """
+        B, H, N, D = key.shape
+        device = key.device
+        
+        if method == "dense":
+            # Keep everything - shouldn't be called, but handle gracefully
+            importance = torch.ones(B, H, N, device=device)
+        
+        elif method == "h2o":
+            # H2O (Heavy Hitter Oracle): Use L2 norm of key vectors as importance
+            # This is the standard magnitude-based approach
             importance = key.norm(dim=-1)  # [B, H, N]
         
+        elif method == "cab_v3":
+            # CAB V3: Pure FRC-based (uniqueness only, no magnitude)
+            k_norm = F.normalize(key, dim=-1)
+            sim = torch.matmul(k_norm, k_norm.transpose(-2, -1))  # [B, H, N, N]
+            redundancy = sim.mean(dim=-1)  # [B, H, N]
+            importance = 1.0 - redundancy  # Uniqueness
+        
         elif method == "cab_v4":
-            # CAB V4: Hybrid of magnitude + uniqueness
+            # CAB V4: Hybrid of magnitude + uniqueness (topological importance)
             magnitude = key.norm(dim=-1)  # [B, H, N]
             
-            # Compute uniqueness (inverse of redundancy)
+            # Compute uniqueness (inverse of redundancy via cosine similarity)
             k_norm = F.normalize(key, dim=-1)
             sim = torch.matmul(k_norm, k_norm.transpose(-2, -1))  # [B, H, N, N]
             redundancy = sim.mean(dim=-1)  # [B, H, N]
             uniqueness = 1.0 - redundancy
             
-            # Normalize both to [0, 1] range
-            mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
-            uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
+            # Normalize both to [0, 1] range for fair combination
+            mag_min, mag_max = magnitude.min(), magnitude.max()
+            mag_norm = (magnitude - mag_min) / (mag_max - mag_min + 1e-8)
             
-            # Combine
+            uniq_min, uniq_max = uniqueness.min(), uniqueness.max()
+            uniq_norm = (uniqueness - uniq_min) / (uniq_max - uniq_min + 1e-8)
+            
+            # Combine with specified ratio
             importance = magnitude_ratio * mag_norm + (1 - magnitude_ratio) * uniq_norm
         
         elif method == "streaming_llm":
-            # Keep first 4 tokens (sinks) and last tokens
-            importance = torch.zeros(B, H, N, device=key.device)
-            importance[:, :, :4] = 1e6  # Always keep sinks
-            if num_keep > 4:
-                importance[:, :, -(num_keep-4):] = torch.arange(num_keep-4, device=key.device).float()
+            # StreamingLLM: Keep first 4 tokens (attention sinks) + recent tokens
+            # This mimics the StreamingLLM paper approach
+            importance = torch.zeros(B, H, N, device=device)
+            num_sinks = min(4, N)
+            importance[:, :, :num_sinks] = 1e6  # Always keep attention sinks
+            
+            # Give recency-based scores to remaining tokens
+            if N > num_sinks:
+                recency = torch.arange(N, device=device).float()
+                importance[:, :, num_sinks:] = recency[num_sinks:]
         
-        else:  # random
-            importance = torch.rand(B, H, N, device=key.device)
+        elif method == "local_strided":
+            # Local + Strided: Keep local window + strided global tokens
+            importance = torch.zeros(B, H, N, device=device)
+            
+            # Local window: last 25% of tokens get high importance
+            local_start = int(N * 0.75)
+            importance[:, :, local_start:] = 1e6
+            
+            # Strided global: every 4th token from the rest
+            stride = 4
+            strided_indices = torch.arange(0, local_start, stride, device=device)
+            importance[:, :, strided_indices] = 1e3
+        
+        elif method == "random":
+            # Random baseline: random importance scores
+            importance = torch.rand(B, H, N, device=device)
+        
+        else:
+            # Unknown method - fallback to magnitude
+            logger.warning(f"Unknown method '{method}', falling back to magnitude-based")
+            importance = key.norm(dim=-1)
         
         return importance
     

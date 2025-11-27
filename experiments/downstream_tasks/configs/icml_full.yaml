@@ -1,0 +1,46 @@
+# Full ICML Benchmark Configuration
+# Comprehensive evaluation for paper
+
+name: "icml_downstream_full"
+description: "Full downstream tasks benchmark for ICML submission"
+
+datasets:
+  # Summarization
+  - cnn_dailymail
+  - xsum
+  - multi_news
+  
+  # QA
+  - natural_questions
+  - triviaqa
+  - squad_v2
+  
+  # Code
+  - code_summarization
+  - code_completion
+
+methods:
+  - dense
+  - h2o
+  - cab_v3
+  - cab_v4
+  - streaming_llm
+  - local_strided
+  - random
+
+sparsity_levels:
+  - 0.5
+  - 0.7
+  - 0.8
+  - 0.9
+  - 0.95
+
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_length: 8192
+  max_new_tokens: 256
+  torch_dtype: "float16"
+
+max_samples: 500
+save_predictions: true
+

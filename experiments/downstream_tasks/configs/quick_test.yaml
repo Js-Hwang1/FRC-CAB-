@@ -1,0 +1,26 @@
+# Quick Test Configuration
+# Fast validation that everything works
+
+name: "quick_test"
+description: "Quick validation run"
+
+datasets:
+  - cnn_dailymail
+
+methods:
+  - dense
+  - h2o
+  - cab_v4
+
+sparsity_levels:
+  - 0.9
+
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_length: 4096
+  max_new_tokens: 128
+  torch_dtype: "float16"
+
+max_samples: 10
+save_predictions: true
+

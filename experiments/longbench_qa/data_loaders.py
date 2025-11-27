@@ -377,12 +377,12 @@ class SCROLLSDataset(BaseBenchmarkDataset):
             )
         except Exception:
             # Fallback with trust_remote_code for older datasets
-            dataset = load_dataset(
-                self.HF_DATASET_NAME,
-                subset,
-                split=self.config.split if self.config.split != 'test' else 'validation',
-                trust_remote_code=True,
-            )
+        dataset = load_dataset(
+            self.HF_DATASET_NAME,
+            subset,
+            split=self.config.split if self.config.split != 'test' else 'validation',
+            trust_remote_code=True,
+        )
         
         return list(dataset)
     
@@ -493,13 +493,13 @@ class InfiniteBenchDataset(BaseBenchmarkDataset):
                         split=self.config.split,
                     )
                 except Exception:
-                    dataset = load_dataset(
-                        self.HF_DATASET_NAME,
-                        split=self.config.split,
-                        trust_remote_code=True,
-                    )
-                # Filter for the specific task
-                dataset = dataset.filter(lambda x: x.get('task', '') == subset)
+            dataset = load_dataset(
+                self.HF_DATASET_NAME,
+                split=self.config.split,
+                trust_remote_code=True,
+            )
+            # Filter for the specific task
+            dataset = dataset.filter(lambda x: x.get('task', '') == subset)
         
         return list(dataset)
     
@@ -576,12 +576,12 @@ class ZeroSCROLLSDataset(BaseBenchmarkDataset):
             )
         except Exception:
             # Fallback with trust_remote_code
-            dataset = load_dataset(
-                self.HF_DATASET_NAME,
-                subset,
-                split=self.config.split if self.config.split != 'test' else 'validation',
-                trust_remote_code=True,
-            )
+        dataset = load_dataset(
+            self.HF_DATASET_NAME,
+            subset,
+            split=self.config.split if self.config.split != 'test' else 'validation',
+            trust_remote_code=True,
+        )
         
         return list(dataset)
     
