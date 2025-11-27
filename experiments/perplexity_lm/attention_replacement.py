@@ -332,6 +332,8 @@ class H2OAttention(BaseSparseAttention):
             selected_positions = top_indices.unsqueeze(2)  # [B, H, 1, num_keep]
             causal_mask = (selected_positions > positions).float() * float('-inf')  # [B, H, N, num_keep]
             attn_weights = attn_weights + causal_mask
+            
+            # Note: Skip external attention_mask as it's for full sequence, not selected keys
         else:
             # Dense attention with causal mask
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
@@ -341,9 +343,10 @@ class H2OAttention(BaseSparseAttention):
             )
             attn_weights = attn_weights + causal_mask
             v_selected = v
-        
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+            
+            # Apply external attention mask only for dense path
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
         
         # Softmax and value aggregation
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -423,6 +426,8 @@ class CABV4Attention(BaseSparseAttention):
             selected_positions = top_indices.unsqueeze(2)  # [B, H, 1, num_keep]
             causal_mask = (selected_positions > positions).float() * float('-inf')  # [B, H, N, num_keep]
             attn_weights = attn_weights + causal_mask
+            
+            # Note: Skip external attention_mask as it's for full sequence, not selected keys
         else:
             # Dense attention with causal mask
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
@@ -432,9 +437,10 @@ class CABV4Attention(BaseSparseAttention):
             )
             attn_weights = attn_weights + causal_mask
             v_selected = v
-        
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+            
+            # Apply external attention mask only for dense path
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
         
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
         
