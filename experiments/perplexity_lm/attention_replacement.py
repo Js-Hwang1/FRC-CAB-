@@ -200,14 +200,20 @@ class BaseSparseAttention(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.Tensor] = None,  # New in transformers 4.36+
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # Newer models
         **kwargs,
     ) -> Tuple[torch.Tensor, ...]:
         """Forward pass matching HuggingFace attention interface."""
         
         q, k, v = self._get_qkv(hidden_states)
         
-        # Apply rotary embeddings if available
-        if hasattr(self.original_attention, 'rotary_emb') and position_ids is not None:
+        # Apply rotary embeddings
+        # Newer transformers pass position_embeddings directly
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        elif hasattr(self.original_attention, 'rotary_emb') and position_ids is not None:
             try:
                 # Different models have different rotary_emb signatures
                 rotary_emb = self.original_attention.rotary_emb
