@@ -507,6 +507,10 @@ class PerplexityBenchmarkRunner:
         results = {}
         
         for sparsity in sweep_config.sparsity_levels:
+            # Dense method always uses sparsity=0, skip other levels
+            if method_name == "dense" and sparsity > 0:
+                continue
+            
             try:
                 result = self.run_single_evaluation(
                     dataset_name=dataset_name,
@@ -560,10 +564,12 @@ class PerplexityBenchmarkRunner:
                 
                 # Run context length sweep
                 if self.config.context_length_sweep.enabled:
+                    # Dense method always uses sparsity=0
+                    ctx_sparsity = 0.0 if method_name == "dense" else self.config.context_length_sweep.fixed_sparsity
                     ctx_results = self.run_context_length_sweep(
                         dataset_name=dataset_name,
                         method_name=method_name,
-                        sparsity=self.config.context_length_sweep.fixed_sparsity,
+                        sparsity=ctx_sparsity,
                     )
                     method_results['context_length_sweep'] = {
                         str(k): v.to_dict() for k, v in ctx_results.items()
@@ -722,24 +728,46 @@ def generate_summary_table(
     Returns Table 3 style format.
     """
     lines = [
-        "| Dataset | Method | Sparsity | Perplexity | Δ PPL (%) |",
-        "|---------|--------|----------|------------|-----------|",
+        "| Dataset | Method | Sparsity | Perplexity | Δ vs Dense |",
+        "|---------|--------|----------|------------|------------|",
     ]
     
     for dataset_name, dataset_results in results.get('results', {}).items():
+        # First, find dense baseline perplexity
+        dense_ppl = None
+        if 'dense' in dataset_results:
+            dense_sweep = dataset_results['dense'].get('sparsity_sweep', {})
+            if '0.0' in dense_sweep:
+                dense_ppl = dense_sweep['0.0'].get('perplexity', float('nan'))
+        
         for method_name, method_results in dataset_results.items():
-            # Use sparsity sweep at 90% for comparison
             sweep = method_results.get('sparsity_sweep', {})
             
-            if '0.0' in sweep and '0.9' in sweep:
-                dense_ppl = sweep['0.0'].get('perplexity', float('nan'))
-                sparse_ppl = sweep['0.9'].get('perplexity', float('nan'))
-                
-                if not math.isnan(dense_ppl) and not math.isnan(sparse_ppl):
-                    delta = (sparse_ppl - dense_ppl) / dense_ppl * 100
-                    lines.append(
-                        f"| {dataset_name} | {method_name} | 0.9 | {sparse_ppl:.2f} | {delta:+.1f}% |"
-                    )
+            if method_name == "dense":
+                # Dense: show baseline (sparsity=0)
+                if '0.0' in sweep:
+                    ppl = sweep['0.0'].get('perplexity', float('nan'))
+                    if not math.isnan(ppl):
+                        lines.append(
+                            f"| {dataset_name} | dense | 0.0 | {ppl:.2f} | baseline |"
+                        )
+            else:
+                # Sparse methods: show each sparsity level
+                for sparsity_str, ppl_result in sorted(sweep.items(), key=lambda x: float(x[0])):
+                    sparsity = float(sparsity_str)
+                    if sparsity == 0.0:
+                        continue  # Skip 0 sparsity for sparse methods
+                    
+                    ppl = ppl_result.get('perplexity', float('nan'))
+                    if not math.isnan(ppl):
+                        if dense_ppl and not math.isnan(dense_ppl):
+                            delta = (ppl - dense_ppl) / dense_ppl * 100
+                            delta_str = f"{delta:+.1f}%"
+                        else:
+                            delta_str = "N/A"
+                        lines.append(
+                            f"| {dataset_name} | {method_name} | {sparsity} | {ppl:.2f} | {delta_str} |"
+                        )
     
     return "\n".join(lines)
 

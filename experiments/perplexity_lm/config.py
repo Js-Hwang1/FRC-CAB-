@@ -437,7 +437,7 @@ def create_quick_test() -> ExperimentConfig:
         name="quick_perplexity_test",
         description="Quick perplexity test for debugging",
         datasets=["wikitext-2"],
-        methods=["dense", "cab_v4"],
+        methods=["dense", "h2o", "cab_v4"],  # Added h2o for comparison
         model=ModelConfig(
             name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
             max_length=1024,
@@ -448,7 +448,7 @@ def create_quick_test() -> ExperimentConfig:
         ),
         sparsity_sweep=SparsitySweepConfig(
             enabled=True,
-            sparsity_levels=[0.0, 0.9],
+            sparsity_levels=[0.0, 0.5, 0.7, 0.9],  # More gradual sparsity
         ),
     )
 
