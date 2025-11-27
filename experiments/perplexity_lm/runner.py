@@ -1,13 +1,22 @@
 """
 Benchmark Runner for Language Model Perplexity Evaluation
 
-Orchestrates:
-- Model loading with sparse attention methods
-- Dataset iteration
-- Perplexity computation with ACTUAL sparse attention
-- Context length scaling analysis
-- Sparsity trade-off curves
-- Result aggregation and saving
+Implements EXACT published algorithms for fair comparison:
+
+Baselines:
+- Dense: Full attention (no sparsity)
+- H2O: Heavy-Hitter Oracle (Zhang et al., 2023) - arxiv:2306.14048
+  Uses CUMULATIVE ATTENTION SCORES to identify important tokens.
+  Evicts tokens with lowest cumulative attention.
+  
+- StreamingLLM: Efficient Streaming LLM (Xiao et al., 2023) - arxiv:2309.17453
+  Keeps "attention sinks" (first few tokens) + sliding window.
+  Key insight: Initial tokens receive disproportionate attention.
+
+Our Method:
+- CAB V4: Curvature-Aware Block-Sparse Attention
+  Hybrid importance: 50% magnitude + 50% uniqueness (FRC-based)
+  Captures topologically important tokens via Forman-Ricci Curvature.
 
 ICML Publication-Quality Implementation
 """
@@ -90,50 +99,8 @@ class SparsePerplexityEvaluator:
         self.sparsity = sparsity
         self.magnitude_ratio = magnitude_ratio
         
-        # Store original attention layers
-        self.original_attentions = None
-        self.attention_replaced = False
-        
         self.model.eval()
     
-    def _replace_attention(self):
-        """Replace attention layers with sparse implementation."""
-        if self.attention_replaced:
-            return
-        
-        from .attention_replacement import (
-            replace_attention_layers,
-            get_original_attention_layers,
-        )
-        
-        # Store originals for restoration
-        self.original_attentions = get_original_attention_layers(self.model)
-        
-        # Replace with sparse attention
-        method_kwargs = {}
-        if self.method in ['cab_v4', 'cab_v3']:
-            method_kwargs['magnitude_ratio'] = self.magnitude_ratio if self.method == 'cab_v4' else 0.0
-        
-        replace_attention_layers(
-            self.model,
-            method=self.method,
-            sparsity=self.sparsity,
-            **method_kwargs,
-        )
-        
-        self.attention_replaced = True
-        logger.info(f"Attention layers replaced with {self.method} (sparsity={self.sparsity})")
-    
-    def _restore_attention(self):
-        """Restore original attention layers."""
-        if not self.attention_replaced or self.original_attentions is None:
-            return
-        
-        from .attention_replacement import restore_attention_layers
-        
-        restore_attention_layers(self.model, self.original_attentions)
-        self.attention_replaced = False
-        logger.info("Original attention layers restored")
     
     @torch.no_grad()
     def evaluate_batch(
@@ -405,9 +372,6 @@ class SparsePerplexityEvaluator:
             if verbose and (batch_idx + 1) % 10 == 0:
                 current_ppl = math.exp(total_nll / total_tokens) if total_tokens > 0 else float('nan')
                 logger.info(f"Processed {num_samples} samples, current PPL: {current_ppl:.2f}")
-        
-        # Restore original attention
-        self._restore_attention()
         
         if total_tokens == 0:
             return PerplexityResult(
