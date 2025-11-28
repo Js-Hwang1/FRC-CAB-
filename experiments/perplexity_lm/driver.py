@@ -12,7 +12,7 @@ Usage:
     # Custom configuration
     python -m experiments.perplexity_lm.driver \
         --datasets wikitext-103 c4 \
-        --methods dense h2o cab_v4 \
+        --methods dense h2o cab \
         --model meta-llama/Llama-2-7b-hf \
         --sparsity-levels 0.0 0.9 0.95 \
         --context-lengths 512 1024 2048 4096
@@ -50,7 +50,7 @@ Examples:
   python driver.py --quick-test
   
   # WikiText-103 with multiple methods
-  python driver.py --datasets wikitext-103 --methods dense h2o cab_v4
+  python driver.py --datasets wikitext-103 --methods dense h2o cab
   
   # Full ICML benchmark
   python driver.py --icml-full
@@ -99,9 +99,9 @@ Examples:
     method_group.add_argument(
         "--methods",
         nargs="+",
-        default=["dense", "cab_v4"],
+        default=["dense", "cab"],
         choices=list(METHOD_CONFIGS.keys()),
-        help="Attention methods to compare (default: dense cab_v4)",
+        help="Attention methods to compare (default: dense cab)",
     )
     
     # Model configuration

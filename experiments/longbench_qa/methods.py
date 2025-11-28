@@ -3,11 +3,10 @@ Sparse Attention Methods for Long-Context Benchmarks
 
 Implements all attention methods for fair apple-to-apple comparison:
 - Dense Attention (oracle upper bound)
-- H2O (Heavy-Hitter Oracle) - magnitude-based
-- CAB V3 (Pure FRC)
-- CAB V4 (Hybrid: magnitude + FRC) - OUR METHOD
-- StreamingLLM (attention sinks + recent tokens)
-- Local + Strided (fixed window patterns)
+- H2O (Heavy-Hitter Oracle) - magnitude-based (arxiv:2306.14048)
+- CAB (Curvature-Aware Block-Sparse) - OUR METHOD
+- StreamingLLM (attention sinks + recent tokens) (arxiv:2309.17453)
+- Local + Strided (fixed window patterns) (arxiv:1904.10509)
 - Random Selection (baseline)
 
 All methods operate on the same interface for fair comparison.
@@ -357,7 +356,7 @@ class CABV3Attention(BaseAttentionMethod):
         modified_weights = torch.nan_to_num(modified_weights, nan=0.0)
         
         diagnostics = {
-            'method': 'cab_v3',
+            'method': 'cab',
             'sparsity': self.compute_effective_sparsity(token_mask),
             'frc_mean': frc_scores.mean().item(),
             'frc_std': frc_scores.std().item(),
@@ -485,7 +484,7 @@ class CABV4Attention(BaseAttentionMethod):
         modified_weights = torch.nan_to_num(modified_weights, nan=0.0)
         
         diagnostics = {
-            'method': 'cab_v4',
+            'method': 'cab',
             'sparsity': self.compute_effective_sparsity(token_mask),
             'magnitude_ratio': self.config.magnitude_ratio,
             'frc_mean': frc_scores.mean().item(),
@@ -865,8 +864,7 @@ class MethodRegistry:
     _methods = {
         MethodName.DENSE: DenseAttention,
         MethodName.H2O: H2OAttention,
-        MethodName.CAB_V3: CABV3Attention,
-        MethodName.CAB_V4: CABV4Attention,
+        MethodName.CAB: CABV4Attention,  # CAB uses CABV4's hybrid implementation
         MethodName.STREAMING_LLM: StreamingLLMAttention,
         MethodName.LOCAL_STRIDED: LocalStridedAttention,
         MethodName.RANDOM: RandomAttention,
@@ -900,7 +898,7 @@ def get_method(
     Get attention method by name.
     
     Args:
-        name: Method name (e.g., "cab_v4", "h2o")
+        name: Method name (e.g., "cab", "h2o")
         config: Optional custom configuration
         **kwargs: Override config parameters
     
@@ -908,7 +906,7 @@ def get_method(
         BaseAttentionMethod instance
     
     Example:
-        >>> method = get_method("cab_v4", sparsity=0.95)
+        >>> method = get_method("cab", sparsity=0.95)
         >>> modified_attn, diag = method.modify_attention_weights(attn, q, k)
     """
     from .config import METHOD_CONFIGS
@@ -952,7 +950,7 @@ def compare_methods(
         Dict mapping method name to results
     """
     if methods is None:
-        methods = ["dense", "h2o", "cab_v4", "streaming_llm", "random"]
+        methods = ["dense", "h2o", "cab", "streaming_llm", "random"]
     
     results = {}
     

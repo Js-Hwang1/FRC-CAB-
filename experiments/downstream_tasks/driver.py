@@ -18,7 +18,7 @@ Example usage:
     # Custom run
     python -m experiments.downstream_tasks.driver \
         --datasets cnn_dailymail xsum \
-        --methods dense h2o cab_v4 \
+        --methods dense h2o cab \
         --sparsity 0.9 \
         --max-samples 100
 """
@@ -66,7 +66,7 @@ Examples:
   python -m experiments.downstream_tasks.driver \\
       --model Qwen/Qwen2.5-7B-Instruct \\
       --datasets cnn_dailymail xsum \\
-      --methods dense h2o cab_v4 \\
+      --methods dense h2o cab \\
       --sparsity 0.5 0.7 0.9 \\
       --max-samples 100
 
@@ -178,9 +178,9 @@ def list_methods():
             desc = "Full attention (oracle upper bound)"
         elif name == "h2o":
             desc = "Heavy Hitter Oracle - magnitude-based"
-        elif name == "cab_v3":
+        elif name == "cab":
             desc = "CAB V3 - pure FRC-based"
-        elif name == "cab_v4":
+        elif name == "cab":
             desc = "CAB V4 - hybrid magnitude + FRC"
         elif name == "streaming_llm":
             desc = "Attention sinks + recency"
@@ -207,7 +207,7 @@ def build_config(args) -> ExperimentConfig:
     
     # Override with CLI args
     datasets = args.datasets or preset.get('datasets', ['cnn_dailymail'])
-    methods = args.methods or preset.get('methods', ['dense', 'h2o', 'cab_v4'])
+    methods = args.methods or preset.get('methods', ['dense', 'h2o', 'cab'])
     sparsity_levels = args.sparsity or preset.get('sparsity_levels', [0.9])
     
     if args.compare_all:

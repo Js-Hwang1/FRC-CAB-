@@ -10,7 +10,7 @@ USAGE:
 python driver.py --quick-test
 
 # Run specific experiment
-python driver.py --datasets narrativeqa qasper --methods cab_v4 h2o --sparsity 0.9 0.95
+python driver.py --datasets narrativeqa qasper --methods cab h2o --sparsity 0.9 0.95
 
 # Run full benchmark suite
 python driver.py --preset full
@@ -19,7 +19,7 @@ python driver.py --preset full
 python driver.py --config configs/icml_benchmark.yaml
 
 # Sparsity sweep
-python driver.py --sweep --datasets narrativeqa --methods cab_v4
+python driver.py --sweep --datasets narrativeqa --methods cab
 
 # Compare all methods
 python driver.py --compare-all --datasets narrativeqa --sparsity 0.9
@@ -81,70 +81,70 @@ PRESETS = {
     'quick': {
         'description': 'Quick test with minimal samples',
         'datasets': ['narrativeqa'],
-        'methods': ['dense', 'cab_v4'],
+        'methods': ['dense', 'cab'],
         'sparsity_levels': [0.9],
         'max_samples': 10,
     },
     'standard': {
         'description': 'Standard benchmark with moderate samples',
         'datasets': ['narrativeqa', 'qasper', 'hotpotqa'],
-        'methods': ['dense', 'h2o', 'cab_v4', 'streaming_llm'],
+        'methods': ['dense', 'h2o', 'cab', 'streaming_llm'],
         'sparsity_levels': [0.9, 0.95],
         'max_samples': 100,
     },
     'full': {
         'description': 'Full ICML benchmark (all datasets, methods, sparsity levels)',
         'datasets': list(LONGBENCH_DATASETS.keys())[:8],  # Main LongBench QA tasks
-        'methods': ['dense', 'h2o', 'cab_v4', 'cab_v3', 'streaming_llm', 'local_strided', 'random'],
+        'methods': ['dense', 'h2o', 'cab', 'cab', 'streaming_llm', 'local_strided', 'random'],
         'sparsity_levels': [0.5, 0.7, 0.8, 0.9, 0.95, 0.99],
         'max_samples': None,  # Use all samples
     },
     'longbench_qa': {
         'description': 'LongBench QA tasks only',
         'datasets': ['narrativeqa', 'qasper', 'multifieldqa_en', 'hotpotqa', '2wikimqa', 'musique'],
-        'methods': ['dense', 'h2o', 'cab_v4', 'streaming_llm'],
+        'methods': ['dense', 'h2o', 'cab', 'streaming_llm'],
         'sparsity_levels': [0.9, 0.95],
         'max_samples': 200,
     },
     'longbench_sum': {
         'description': 'LongBench summarization tasks',
         'datasets': ['gov_report', 'qmsum', 'multi_news'],
-        'methods': ['dense', 'h2o', 'cab_v4'],
+        'methods': ['dense', 'h2o', 'cab'],
         'sparsity_levels': [0.9, 0.95],
         'max_samples': 100,
     },
     'scrolls': {
         'description': 'SCROLLS benchmark',
         'datasets': ['quality', 'qasper_scrolls', 'narrativeqa_scrolls', 'summ_screen_fd'],
-        'methods': ['dense', 'h2o', 'cab_v4', 'streaming_llm'],
+        'methods': ['dense', 'h2o', 'cab', 'streaming_llm'],
         'sparsity_levels': [0.9, 0.95],
         'max_samples': 100,
     },
     'infinitebench': {
         'description': 'InfiniteBench extreme long-context (128K+)',
         'datasets': ['passkey', 'number_string', 'kv_retrieval'],
-        'methods': ['dense', 'h2o', 'cab_v4'],
+        'methods': ['dense', 'h2o', 'cab'],
         'sparsity_levels': [0.95, 0.99],
         'max_samples': 50,
     },
     'zeroscrolls': {
         'description': 'ZeroSCROLLS zero-shot benchmark',
         'datasets': ['quality_zero', 'qasper_zero', 'narrativeqa_zero'],
-        'methods': ['dense', 'h2o', 'cab_v4'],
+        'methods': ['dense', 'h2o', 'cab'],
         'sparsity_levels': [0.9],
         'max_samples': 100,
     },
     'ablation_sparsity': {
         'description': 'Sparsity ablation study',
         'datasets': ['narrativeqa', 'qasper'],
-        'methods': ['cab_v4'],
+        'methods': ['cab'],
         'sparsity_levels': [0.0, 0.3, 0.5, 0.7, 0.8, 0.85, 0.9, 0.93, 0.95, 0.97, 0.99],
         'max_samples': 100,
     },
     'ablation_ratio': {
         'description': 'Magnitude ratio ablation for CAB V4',
         'datasets': ['narrativeqa'],
-        'methods': ['cab_v4'],  # Will be run with different magnitude_ratio values
+        'methods': ['cab'],  # Will be run with different magnitude_ratio values
         'sparsity_levels': [0.9],
         'max_samples': 100,
         'magnitude_ratios': [0.0, 0.25, 0.5, 0.75, 1.0],  # Custom parameter
@@ -382,7 +382,7 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
     
     # Start with defaults
     datasets = ['narrativeqa']
-    methods = ['dense', 'cab_v4']
+    methods = ['dense', 'cab']
     sparsity_levels = [0.9]
     max_samples = 100
     
@@ -523,8 +523,8 @@ def list_methods():
         desc = {
             'dense': 'Full attention (oracle upper bound)',
             'h2o': 'Heavy-Hitter Oracle - magnitude-based selection',
-            'cab_v3': 'Pure FRC - topology-based selection',
-            'cab_v4': 'Hybrid - magnitude + FRC (RECOMMENDED)',
+            'cab': 'Pure FRC - topology-based selection',
+            'cab': 'Hybrid - magnitude + FRC (RECOMMENDED)',
             'streaming_llm': 'Attention sinks + recent window',
             'local_strided': 'Local window + strided patterns',
             'random': 'Random selection baseline',

@@ -20,7 +20,7 @@ Methods:
 
 Usage:
     python driver.py --config configs/full_benchmark.yaml
-    python driver.py --methods cab_v4 h2o --datasets longbench --sparsity 0.9
+    python driver.py --methods cab h2o --datasets longbench --sparsity 0.9
 """
 
 __version__ = "0.1.0"
