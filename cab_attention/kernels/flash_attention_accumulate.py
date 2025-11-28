@@ -511,6 +511,15 @@ def replace_attention_with_flash(
                     logger.warning(f"Skipping {module_name}: cannot determine num_heads")
                     continue
 
+            # Handle num_key_value_heads (also from config in Qwen2)
+            if not hasattr(attn_module, 'num_key_value_heads'):
+                if hasattr(attn_module, 'config') and hasattr(attn_module.config, 'num_key_value_heads'):
+                    # Qwen2 style: add num_key_value_heads from config
+                    attn_module.num_key_value_heads = attn_module.config.num_key_value_heads
+                else:
+                    logger.warning(f"Skipping {module_name}: cannot determine num_key_value_heads")
+                    continue
+
             # Monkey-patch the forward method
             attn_module.forward = _create_flash_attention_forward(attn_module, layer_idx)
             logger.info(f"Patched {module_name} with Flash Attention")
