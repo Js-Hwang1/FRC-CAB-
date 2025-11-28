@@ -16,7 +16,9 @@
       "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"git clone -b main https://github.com/Js-Hwang1/FRC-CAB-.git ~/FRC 2>/dev/null || (cd ~/FRC && git pull origin main)\")",
       "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"cd ~/FRC && git pull origin main && python test_runtime.py\")",
       "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"cd ~/FRC && timeout 300 python -m experiments.longbench_qa.driver --model Qwen/Qwen2.5-7B-Instruct --methods cab h2o --datasets narrativeqa --sparsity 0.9 2>&1 | head -100\")",
-      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"ps aux | grep python | grep longbench_qa || echo ''No benchmark process running''\")"
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"ps aux | grep python | grep longbench_qa || echo ''No benchmark process running''\")",
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"cd ~/FRC && git pull origin main && timeout 600 python -m experiments.longbench_qa.driver --model Qwen/Qwen2.5-7B-Instruct --methods h2o --datasets narrativeqa --sparsity 0.9 --max-samples 5 2>&1 | tail -50\")",
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no rover-advertiser-african-juice.trycloudflare.com \"cd ~/FRC && git pull origin main\")"
     ],
     "deny": [],
     "ask": []
