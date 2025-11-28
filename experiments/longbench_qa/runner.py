@@ -11,12 +11,9 @@ Baselines:
 - StreamingLLM: Efficient Streaming LLM (Xiao et al., 2023) - arxiv:2309.17453
   Keeps "attention sinks" (first few tokens) + sliding window.
 
-Our Methods:
-- CAB V5: Curvature-Aware Block-Sparse Attention (NEW - uses CABCache)
-  Three-component eviction: local + bridge (low FRC) + importance (H2O-style)
-  
-- CAB V4: Legacy hybrid (50% magnitude + 50% uniqueness)
-  Kept for backward compatibility.
+Our Method:
+- CAB: Curvature-Aware Block-Sparse Attention
+  Three-component eviction: local + bridge (low FRC) + importance
 
 Other Baselines:
 - Random: Random token selection (lower bound)
@@ -286,7 +283,7 @@ class ModelWrapper:
             context: Long context
             question: Question to answer
             max_new_tokens: Max tokens to generate
-            sparse_method: "dense", "h2o", "cab_v4", "random"
+            sparse_method: "dense", "h2o", "cab", "random"
             sparsity: Fraction of attention to prune (0.0 = dense, 0.9 = keep 10%)
             magnitude_ratio: For CAB V4, ratio of magnitude vs FRC
         
@@ -438,8 +435,8 @@ Answer:"""
         - CAB V4: Legacy hybrid magnitude + uniqueness
         """
         # Use CAB V5 with the new CABCache
-        if method == "cab_v5":
-            return self._generate_with_cab_v5(inputs, max_new_tokens, sparsity)
+        if method == "cab":
+            return self._generate_with_cab(inputs, max_new_tokens, sparsity)
         
         device = inputs['input_ids'].device
         batch_size = inputs['input_ids'].shape[0]
@@ -541,28 +538,26 @@ Answer:"""
         
         return generated_ids
     
-    def _generate_with_cab_v5(
+    def _generate_with_cab(
         self,
         inputs: Dict[str, torch.Tensor],
         max_new_tokens: int,
         sparsity: float,
     ) -> torch.Tensor:
         """
-        Generate using CAB V5 with the new CABCache.
+        Generate using CAB with CABCache.
         
-        CAB V5 uses three-component eviction:
+        CAB uses three-component eviction:
         - Local: Recent tokens (30%)
         - Bridge: Low FRC connectors (20%)
         - Importance: High cumulative attention (50%)
-        
-        This is more principled than CAB V4's simple magnitude + uniqueness hybrid.
         """
         try:
             from cab_attention import CABCache
             from cab_attention.integration import generate_with_cab
         except ImportError as e:
-            logger.warning(f"CABCache not available: {e}. Falling back to CAB V4.")
-            return self._sparse_generate_legacy(inputs, max_new_tokens, "cab_v4", sparsity)
+            logger.warning(f"CABCache not available: {e}. Using fallback.")
+            return self._sparse_generate_fallback(inputs, max_new_tokens, sparsity)
         
         device = inputs['input_ids'].device
         input_len = inputs['input_ids'].shape[1]
@@ -723,25 +718,6 @@ Answer:"""
             recent_indices = torch.arange(recent_start, N, device=device)
             keep_indices = torch.cat([sink_indices, recent_indices])
         
-        elif method == "cab_v4":
-            # CAB V4: Hybrid magnitude + uniqueness
-            magnitude = key.norm(dim=-1).mean(dim=(0, 1))  # [N]
-            
-            # Uniqueness
-            keys_flat = key.mean(dim=(0, 1))  # [N, D]
-            keys_norm = F.normalize(keys_flat, dim=-1)
-            similarity = torch.mm(keys_norm, keys_norm.t())
-            redundancy = similarity.mean(dim=-1)
-            uniqueness = 1.0 - redundancy
-            
-            # Normalize and combine
-            mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
-            uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
-            importance = magnitude_ratio * mag_norm + (1 - magnitude_ratio) * uniq_norm
-            
-            _, keep_indices = torch.topk(importance, k=num_keep, largest=True)
-            keep_indices = keep_indices.sort().values
-        
         else:
             # Other methods: use existing _compute_importance
             importance = self._compute_importance(key, method, magnitude_ratio, num_keep)
@@ -823,15 +799,9 @@ Answer:"""
             # This is the standard magnitude-based approach
             importance = key.norm(dim=-1)  # [B, H, N]
         
-        elif method == "cab_v3":
-            # CAB V3: Pure FRC-based (uniqueness only, no magnitude)
-            k_norm = F.normalize(key, dim=-1)
-            sim = torch.matmul(k_norm, k_norm.transpose(-2, -1))  # [B, H, N, N]
-            redundancy = sim.mean(dim=-1)  # [B, H, N]
-            importance = 1.0 - redundancy  # Uniqueness
-        
-        elif method == "cab_v4":
-            # CAB V4: Hybrid of magnitude + uniqueness (topological importance)
+        elif method == "cab":
+            # CAB: Three-component importance (fallback when CABCache not available)
+            # Uses magnitude + uniqueness as proxy for full CAB
             magnitude = key.norm(dim=-1)  # [B, H, N]
             
             # Compute uniqueness (inverse of redundancy via cosine similarity)
@@ -840,15 +810,15 @@ Answer:"""
             redundancy = sim.mean(dim=-1)  # [B, H, N]
             uniqueness = 1.0 - redundancy
             
-            # Normalize both to [0, 1] range for fair combination
+            # Normalize both to [0, 1] range
             mag_min, mag_max = magnitude.min(), magnitude.max()
             mag_norm = (magnitude - mag_min) / (mag_max - mag_min + 1e-8)
             
             uniq_min, uniq_max = uniqueness.min(), uniqueness.max()
             uniq_norm = (uniqueness - uniq_min) / (uniq_max - uniq_min + 1e-8)
             
-            # Combine with specified ratio
-            importance = magnitude_ratio * mag_norm + (1 - magnitude_ratio) * uniq_norm
+            # 50% magnitude + 50% uniqueness
+            importance = 0.5 * mag_norm + 0.5 * uniq_norm
         
         elif method == "streaming_llm":
             # StreamingLLM: Keep first 4 tokens (attention sinks) + recent tokens
@@ -1231,7 +1201,7 @@ def quick_evaluate(
         MethodResult with evaluation results
     
     Example:
-        >>> result = quick_evaluate("narrativeqa", "cab_v4", sparsity=0.9, max_samples=5)
+        >>> result = quick_evaluate("narrativeqa", "cab", sparsity=0.9, max_samples=5)
         >>> print(result.metrics)
     """
     config = ExperimentConfig(
@@ -1274,7 +1244,7 @@ def evaluate_sparsity_sweep(
         Dict mapping sparsity to MethodResult
     
     Example:
-        >>> results = evaluate_sparsity_sweep("narrativeqa", "cab_v4")
+        >>> results = evaluate_sparsity_sweep("narrativeqa", "cab")
         >>> for sparsity, result in results.items():
         ...     print(f"{sparsity:.0%}: F1={result.metrics['f1']['mean']:.4f}")
     """
@@ -1324,12 +1294,12 @@ def compare_methods_on_dataset(
         Dict mapping method name to MethodResult
     
     Example:
-        >>> results = compare_methods_on_dataset("narrativeqa", ["dense", "h2o", "cab_v4"])
+        >>> results = compare_methods_on_dataset("narrativeqa", ["dense", "h2o", "cab"])
         >>> for method, result in results.items():
         ...     print(f"{method}: F1={result.metrics['f1']['mean']:.4f}")
     """
     if methods is None:
-        methods = ["dense", "h2o", "cab_v4", "streaming_llm", "random"]
+        methods = ["dense", "h2o", "cab", "streaming_llm", "random"]
     
     config = ExperimentConfig(
         name=f"compare_{dataset_name}",
@@ -1363,7 +1333,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LongBench QA Benchmark")
     parser.add_argument("--dataset", type=str, default="narrativeqa",
                         help="Dataset to evaluate")
-    parser.add_argument("--method", type=str, default="cab_v4",
+    parser.add_argument("--method", type=str, default="cab",
                         help="Method to use")
     parser.add_argument("--sparsity", type=float, default=0.9,
                         help="Sparsity level")

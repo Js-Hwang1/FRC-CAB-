@@ -45,15 +45,11 @@ class TaskType(str, Enum):
 class MethodName(str, Enum):
     """Supported sparse attention methods."""
     DENSE = "dense"                     # Full attention (oracle)
-    H2O = "h2o"                         # Heavy-Hitter Oracle
-    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
-    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
-    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
-    STREAMING_LLM = "streaming_llm"     # Attention sinks + recent
-    LOCAL_STRIDED = "local_strided"     # Local window + strided
+    H2O = "h2o"                         # Heavy-Hitter Oracle (arxiv:2306.14048)
+    CAB = "cab"                         # Curvature-Aware Block-Sparse (Ours)
+    STREAMING_LLM = "streaming_llm"     # Attention sinks + recent (arxiv:2309.17453)
+    LOCAL_STRIDED = "local_strided"     # Sparse Transformer (arxiv:1904.10509)
     RANDOM = "random"                   # Random selection baseline
-    SNAPKV = "snapkv"                   # SnapKV (clustering-based)
-    BIGBIRD = "bigbird"                 # BigBird patterns
 
 
 class MetricName(str, Enum):
@@ -496,23 +492,10 @@ METHOD_CONFIGS = {
         name=MethodName.H2O,
         sparsity=0.9,
     ),
-    "cab_v3": MethodConfig(
-        name=MethodName.CAB_V3,
+    "cab": MethodConfig(
+        name=MethodName.CAB,
         sparsity=0.9,
-        magnitude_ratio=0.0,  # Pure FRC
-    ),
-    "cab_v4": MethodConfig(
-        name=MethodName.CAB_V4,
-        sparsity=0.9,
-        magnitude_ratio=0.5,  # 50/50 hybrid
-    ),
-    "cab_v5": MethodConfig(
-        name=MethodName.CAB_V5,
-        sparsity=0.9,
-        # CAB V5 uses three-component eviction:
-        # - local_ratio=0.3 (30% recent tokens)
-        # - bridge_ratio=0.2 (20% low-FRC bridges)
-        # - importance_ratio=0.5 (50% high-attention tokens)
+        # Three-component eviction: local + bridge + importance
     ),
     "streaming_llm": MethodConfig(
         name=MethodName.STREAMING_LLM,
@@ -577,7 +560,7 @@ class ExperimentConfig:
     dataset_configs: Dict[str, DatasetConfig] = field(default_factory=dict)
     
     # Methods to compare
-    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v5"])
+    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab"])
     method_configs: Dict[str, MethodConfig] = field(default_factory=dict)
     
     # Sparsity sweep (for ablations)
@@ -709,7 +692,7 @@ def create_default_experiment(
     """Create default experiment configuration."""
     return ExperimentConfig(
         datasets=datasets or ["narrativeqa", "qasper"],
-        methods=methods or ["dense", "h2o", "cab_v5"],
+        methods=methods or ["dense", "h2o", "cab"],
         sparsity_levels=sparsity_levels or [0.9],
         model=ModelConfig(name=model_name),
     )
@@ -723,7 +706,7 @@ def create_full_benchmark() -> BenchmarkConfig:
         name="longbench_qa",
         description="LongBench QA benchmark",
         datasets=["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm", "local_strided", "random"],
+        methods=["dense", "h2o", "cab", "streaming_llm", "local_strided", "random"],
         sparsity_levels=[0.5, 0.7, 0.8, 0.9, 0.95, 0.99],
     )
     
@@ -732,7 +715,7 @@ def create_full_benchmark() -> BenchmarkConfig:
         name="longbench_summarization",
         description="LongBench summarization benchmark",
         datasets=["gov_report", "qmsum", "multi_news"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm"],
+        methods=["dense", "h2o", "cab", "streaming_llm"],
         sparsity_levels=[0.9, 0.95],
     )
     
@@ -741,7 +724,7 @@ def create_full_benchmark() -> BenchmarkConfig:
         name="scrolls",
         description="SCROLLS benchmark",
         datasets=["quality", "qasper_scrolls", "narrativeqa_scrolls", "summ_screen_fd"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm"],
+        methods=["dense", "h2o", "cab", "streaming_llm"],
         sparsity_levels=[0.9, 0.95],
     )
     
@@ -750,7 +733,7 @@ def create_full_benchmark() -> BenchmarkConfig:
         name="infinitebench",
         description="InfiniteBench extreme long-context benchmark (128K+)",
         datasets=["passkey", "number_string", "kv_retrieval"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm"],
+        methods=["dense", "h2o", "cab", "streaming_llm"],
         sparsity_levels=[0.95, 0.99],
     )
     
@@ -759,7 +742,7 @@ def create_full_benchmark() -> BenchmarkConfig:
         name="zeroscrolls",
         description="ZeroSCROLLS zero-shot benchmark",
         datasets=["quality_zero", "qasper_zero", "narrativeqa_zero"],
-        methods=["dense", "h2o", "cab_v4"],
+        methods=["dense", "h2o", "cab"],
         sparsity_levels=[0.9],
     )
     

@@ -7,16 +7,13 @@ Baselines:
 - Dense: Full attention (no sparsity)
 - H2O: Heavy-Hitter Oracle (Zhang et al., 2023) - arxiv:2306.14048
   Uses CUMULATIVE ATTENTION SCORES to identify important tokens.
-  Evicts tokens with lowest cumulative attention.
   
 - StreamingLLM: Efficient Streaming LLM (Xiao et al., 2023) - arxiv:2309.17453
   Keeps "attention sinks" (first few tokens) + sliding window.
-  Key insight: Initial tokens receive disproportionate attention.
 
 Our Method:
-- CAB V4: Curvature-Aware Block-Sparse Attention
-  Hybrid importance: 50% magnitude + 50% uniqueness (FRC-based)
-  Captures topologically important tokens via Forman-Ricci Curvature.
+- CAB: Curvature-Aware Block-Sparse Attention
+  Three-component eviction: local + bridge (low FRC) + importance
 
 ICML Publication-Quality Implementation
 """
@@ -74,7 +71,7 @@ class SparsePerplexityEvaluator:
     This replaces the model's attention layers with sparse implementations:
     - Dense: Standard attention (baseline)
     - H2O: Heavy Hitter Oracle (Zhang et al., 2023)
-    - CAB V4: Curvature-Aware Block-Sparse (Ours)
+    - CAB: Curvature-Aware Block-Sparse (Ours)
     - StreamingLLM: Attention Sinks (Xiao et al., 2023)
     - Local+Strided: Sparse Transformer (Child et al., 2019)
     
@@ -136,7 +133,7 @@ class SparsePerplexityEvaluator:
         
         H2O: Cumulative attention scores (Zhang et al., 2023)
         StreamingLLM: Sinks + sliding window (Xiao et al., 2023)
-        CAB V4: Hybrid magnitude + uniqueness (Ours)
+        CAB: Three-component eviction (Ours)
         """
         from transformers import DynamicCache
         
@@ -235,8 +232,8 @@ class SparsePerplexityEvaluator:
             - Keep first `sink_size` tokens (attention sinks)
             - Keep most recent tokens to fill remaining budget
             
-        CAB V4 (Ours):
-            - Hybrid: 50% magnitude + 50% uniqueness
+        CAB (Ours):
+            - Three-component: local + bridge + importance
         """
         from transformers import DynamicCache
         
@@ -273,58 +270,37 @@ class SparsePerplexityEvaluator:
             recent_indices = torch.arange(recent_start, cache_len, device=device)
             keep_indices = torch.cat([sink_indices, recent_indices])
         
-        elif self.method == "cab_v4":
-            # CAB V4: Hybrid magnitude + uniqueness (legacy)
-            keys = key_cache[0]  # [B, H, cache_len, D]
-            
-            # Magnitude: L2 norm
-            magnitude = keys.norm(dim=-1).mean(dim=(0, 1))  # [cache_len]
-            
-            # Uniqueness: 1 - avg cosine similarity
-            keys_flat = keys.mean(dim=(0, 1))  # [cache_len, D]
-            keys_norm = F.normalize(keys_flat, dim=-1)
-            similarity = torch.mm(keys_norm, keys_norm.t())
-            redundancy = similarity.mean(dim=-1)
-            uniqueness = 1.0 - redundancy
-            
-            # Normalize to [0, 1]
-            mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
-            uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
-            
-            # Hybrid: 50% magnitude + 50% uniqueness
-            importance = 0.5 * mag_norm + 0.5 * uniq_norm
-            
-            _, keep_indices = torch.topk(importance, k=max_size, largest=True)
-            keep_indices = keep_indices.sort().values
-        
-        elif self.method == "cab_v5":
-            # CAB V5: Three-component eviction (NEW)
-            # Uses CABCache's eviction policy: local + bridge + importance
+        elif self.method == "cab":
+            # CAB: Three-component eviction
             try:
                 from cab_attention.eviction import ThreeComponentEvictionPolicy, EvictionConfig
                 from cab_attention.scoring import FRCTracker
             except ImportError:
-                # Fallback to CAB V4 if cab_attention not available
-                logger.warning("cab_attention not available, falling back to CAB V4")
-                return self._prune_cab_v4_fallback(key_cache, value_cache, max_size, cache_len, device)
-            
-            keys = key_cache[0]  # [B, H, cache_len, D]
-            
-            # Compute importance (H2O-style cumulative attention)
-            importance_scores = cumulative_attention if cumulative_attention is not None else None
-            
-            # Compute FRC scores using FRCTracker
-            frc_tracker = FRCTracker(device=str(device), use_triton=False)
-            frc_scores = frc_tracker.compute_from_keys(keys, force_update=True)
-            
-            # Use three-component policy
-            policy = ThreeComponentEvictionPolicy(EvictionConfig(
-                local_ratio=0.3,
-                bridge_ratio=0.2,
-                importance_ratio=0.5,
-            ))
-            
-            keep_indices, diagnostics = policy.select_indices(
+                # Fallback: magnitude + uniqueness
+                keys = key_cache[0]
+                magnitude = keys.norm(dim=-1).mean(dim=(0, 1))
+                keys_flat = keys.mean(dim=(0, 1))
+                keys_norm = F.normalize(keys_flat, dim=-1)
+                similarity = torch.mm(keys_norm, keys_norm.t())
+                uniqueness = 1.0 - similarity.mean(dim=-1)
+                mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
+                uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
+                importance = 0.5 * mag_norm + 0.5 * uniq_norm
+                _, keep_indices = torch.topk(importance, k=max_size, largest=True)
+                keep_indices = keep_indices.sort().values
+            else:
+                keys = key_cache[0]  # [B, H, cache_len, D]
+                importance_scores = cumulative_attention
+                frc_tracker = FRCTracker(device=str(device), use_triton=False)
+                frc_scores = frc_tracker.compute_from_keys(keys, force_update=True)
+                
+                policy = ThreeComponentEvictionPolicy(EvictionConfig(
+                    local_ratio=0.3,
+                    bridge_ratio=0.2,
+                    importance_ratio=0.5,
+                ))
+                
+                keep_indices, diagnostics = policy.select_indices(
                 cache_len=cache_len,
                 keep_size=max_size,
                 importance_scores=importance_scores,
@@ -441,7 +417,7 @@ class PerplexityBenchmarkRunner:
     
     Supports:
     - Multiple datasets (WikiText-103, C4, PG-19)
-    - Multiple methods (Dense, H2O, CAB V4, etc.)
+    - Multiple methods (Dense, H2O, CAB, etc.)
     - Context length scaling analysis
     - Sparsity trade-off curves
     """

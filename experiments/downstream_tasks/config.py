@@ -53,14 +53,12 @@ class MetricName(Enum):
 
 class MethodName(Enum):
     """Sparse attention methods."""
-    DENSE = "dense"
-    H2O = "h2o"
-    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
-    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
-    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
-    STREAMING_LLM = "streaming_llm"
-    LOCAL_STRIDED = "local_strided"
-    RANDOM = "random"
+    DENSE = "dense"                     # Full attention (oracle)
+    H2O = "h2o"                         # Heavy-Hitter Oracle (arxiv:2306.14048)
+    CAB = "cab"                         # Curvature-Aware Block-Sparse (Ours)
+    STREAMING_LLM = "streaming_llm"     # Attention sinks + recent (arxiv:2309.17453)
+    LOCAL_STRIDED = "local_strided"     # Sparse Transformer (arxiv:1904.10509)
+    RANDOM = "random"                   # Random selection baseline
 
 
 # =============================================================================
@@ -171,7 +169,7 @@ class ExperimentConfig:
             self.datasets = ["cnn_dailymail"]
         
         if not self.methods:
-            self.methods = ["dense", "h2o", "cab_v5"]
+            self.methods = ["dense", "h2o", "cab"]
         
         # Validate datasets
         for ds_name in self.datasets:
@@ -378,22 +376,9 @@ METHOD_CONFIGS: Dict[str, MethodConfig] = {
         sparsity=0.9,
     ),
     
-    "cab_v3": MethodConfig(
-        name=MethodName.CAB_V3,
+    "cab": MethodConfig(
+        name=MethodName.CAB,
         sparsity=0.9,
-        magnitude_ratio=0.0,  # Pure FRC
-    ),
-    
-    "cab_v4": MethodConfig(
-        name=MethodName.CAB_V4,
-        sparsity=0.9,
-        magnitude_ratio=0.5,  # 50% magnitude, 50% FRC
-    ),
-    
-    "cab_v5": MethodConfig(
-        name=MethodName.CAB_V5,
-        sparsity=0.9,
-        # Three-component eviction: local + bridge + importance
     ),
     
     "streaming_llm": MethodConfig(
@@ -423,32 +408,32 @@ METHOD_CONFIGS: Dict[str, MethodConfig] = {
 EXPERIMENT_PRESETS: Dict[str, Dict[str, Any]] = {
     "quick_test": {
         "datasets": ["cnn_dailymail"],
-        "methods": ["dense", "h2o", "cab_v4"],
+        "methods": ["dense", "h2o", "cab"],
         "sparsity_levels": [0.9],
         "max_samples": 10,
     },
     
     "summarization": {
         "datasets": ["cnn_dailymail", "xsum", "multi_news"],
-        "methods": ["dense", "h2o", "cab_v3", "cab_v4", "streaming_llm", "random"],
+        "methods": ["dense", "h2o", "cab", "streaming_llm", "random"],
         "sparsity_levels": [0.5, 0.7, 0.9, 0.95],
     },
     
     "qa": {
         "datasets": ["natural_questions", "triviaqa", "squad_v2"],
-        "methods": ["dense", "h2o", "cab_v3", "cab_v4", "streaming_llm", "random"],
+        "methods": ["dense", "h2o", "cab", "streaming_llm", "random"],
         "sparsity_levels": [0.5, 0.7, 0.9, 0.95],
     },
     
     "code": {
         "datasets": ["code_summarization", "code_completion", "humaneval"],
-        "methods": ["dense", "h2o", "cab_v4", "streaming_llm"],
+        "methods": ["dense", "h2o", "cab", "streaming_llm"],
         "sparsity_levels": [0.5, 0.7, 0.9],
     },
     
     "full_downstream": {
         "datasets": list(ALL_DATASETS.keys()),
-        "methods": ["dense", "h2o", "cab_v3", "cab_v4", "streaming_llm", "local_strided", "random"],
+        "methods": ["dense", "h2o", "cab", "streaming_llm", "local_strided", "random"],
         "sparsity_levels": [0.5, 0.7, 0.8, 0.9, 0.95],
     },
 }

@@ -41,12 +41,10 @@ class PerplexityDataset(str, Enum):
 class MethodName(str, Enum):
     """Supported sparse attention methods."""
     DENSE = "dense"                     # Full attention (oracle)
-    H2O = "h2o"                         # Heavy-Hitter Oracle
-    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
-    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
-    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
-    STREAMING_LLM = "streaming_llm"     # Attention sinks + recent
-    LOCAL_STRIDED = "local_strided"     # Local window + strided
+    H2O = "h2o"                         # Heavy-Hitter Oracle (arxiv:2306.14048)
+    CAB = "cab"                         # Curvature-Aware Block-Sparse (Ours)
+    STREAMING_LLM = "streaming_llm"     # Attention sinks + recent (arxiv:2309.17453)
+    LOCAL_STRIDED = "local_strided"     # Sparse Transformer (arxiv:1904.10509)
     RANDOM = "random"                   # Random selection baseline
 
 
@@ -169,9 +167,7 @@ class MethodConfig:
 METHOD_CONFIGS = {
     "dense": MethodConfig(name=MethodName.DENSE, sparsity=0.0),
     "h2o": MethodConfig(name=MethodName.H2O, sparsity=0.9),
-    "cab_v3": MethodConfig(name=MethodName.CAB_V3, sparsity=0.9, magnitude_ratio=0.0),
-    "cab_v4": MethodConfig(name=MethodName.CAB_V4, sparsity=0.9, magnitude_ratio=0.5),
-    "cab_v5": MethodConfig(name=MethodName.CAB_V5, sparsity=0.9),  # Three-component eviction
+    "cab": MethodConfig(name=MethodName.CAB, sparsity=0.9),
     "streaming_llm": MethodConfig(name=MethodName.STREAMING_LLM, sparsity=0.9),
     "local_strided": MethodConfig(name=MethodName.LOCAL_STRIDED, sparsity=0.9),
     "random": MethodConfig(name=MethodName.RANDOM, sparsity=0.9),
@@ -246,7 +242,7 @@ class ExperimentConfig:
     dataset_configs: Dict[str, DatasetConfig] = field(default_factory=dict)
     
     # Methods to compare
-    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v5"])
+    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab"])
     method_configs: Dict[str, MethodConfig] = field(default_factory=dict)
     
     # Sweep configurations
@@ -384,7 +380,7 @@ def create_icml_benchmark() -> BenchmarkConfig:
         name="wikitext103_perplexity",
         description="Standard perplexity benchmark on WikiText-103",
         datasets=["wikitext-103"],
-        methods=["dense", "h2o", "cab_v4", "cab_v3", "streaming_llm", "local_strided", "random"],
+        methods=["dense", "h2o", "cab", "streaming_llm", "local_strided", "random"],
         context_length_sweep=ContextLengthSweepConfig(
             enabled=True,
             context_lengths=[512, 1024, 2048, 4096],
@@ -400,7 +396,7 @@ def create_icml_benchmark() -> BenchmarkConfig:
         name="c4_perplexity",
         description="Perplexity on diverse web text (C4)",
         datasets=["c4"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm"],
+        methods=["dense", "h2o", "cab", "streaming_llm"],
         context_length_sweep=ContextLengthSweepConfig(
             enabled=True,
             context_lengths=[512, 1024, 2048, 4096],
@@ -416,7 +412,7 @@ def create_icml_benchmark() -> BenchmarkConfig:
         name="pg19_perplexity",
         description="Long-context perplexity on books (PG-19)",
         datasets=["pg19"],
-        methods=["dense", "h2o", "cab_v4", "streaming_llm"],
+        methods=["dense", "h2o", "cab", "streaming_llm"],
         context_length_sweep=ContextLengthSweepConfig(
             enabled=True,
             context_lengths=[1024, 2048, 4096, 8192, 16384],
@@ -439,7 +435,7 @@ def create_quick_test() -> ExperimentConfig:
         name="quick_perplexity_test",
         description="Quick perplexity test for debugging",
         datasets=["wikitext-2"],
-        methods=["dense", "h2o", "cab_v4"],  # Added h2o for comparison
+        methods=["dense", "h2o", "cab"],
         model=ModelConfig(
             name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
             max_length=1024,

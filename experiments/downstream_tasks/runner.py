@@ -1,26 +1,22 @@
 """
-Benchmark Runner for Downstream Tasks (TODO 1.4)
+Benchmark Runner for Downstream Tasks
 
 Implements EXACT published algorithms for fair comparison:
 
 Baselines:
 - Dense: Full attention (no sparsity)
 - H2O: Heavy-Hitter Oracle (Zhang et al., 2023) - arxiv:2306.14048
-  Uses CUMULATIVE ATTENTION SCORES to identify important tokens.
-  
 - StreamingLLM: Efficient Streaming LLM (Xiao et al., 2023) - arxiv:2309.17453
-  Keeps "attention sinks" (first few tokens) + sliding window.
 
 Our Method:
-- CAB V4: Curvature-Aware Block-Sparse Attention
-  Hybrid importance: 50% magnitude + 50% uniqueness (FRC-based)
+- CAB: Curvature-Aware Block-Sparse Attention
+  Three-component eviction: local + bridge (low FRC) + importance
 
 Other Baselines:
 - Random: Random token selection (lower bound)
 - Local+Strided: Sparse Transformer pattern (Child et al., 2019) - arxiv:1904.10509
 
 All methods use KV cache pruning for fair apple-to-apple comparison.
-ICML Publication-Quality Implementation.
 """
 
 import os
@@ -504,29 +500,13 @@ Answer concisely.<|im_end|>
             recent_indices = torch.arange(recent_start, N, device=device)
             keep_indices = torch.cat([sink_indices, recent_indices])
         
-        elif method == "cab_v4":
-            # CAB V4: Hybrid magnitude + uniqueness (legacy)
-            magnitude = key.norm(dim=-1).mean(dim=(0, 1))  # [N]
-            
-            k_norm = F.normalize(key.mean(dim=(0, 1)), dim=-1)
-            similarity = torch.mm(k_norm, k_norm.t())
-            redundancy = similarity.mean(dim=-1)
-            uniqueness = 1.0 - redundancy
-            
-            mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
-            uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
-            importance = magnitude_ratio * mag_norm + (1 - magnitude_ratio) * uniq_norm
-            
-            _, keep_indices = torch.topk(importance, k=num_keep, largest=True)
-            keep_indices = keep_indices.sort().values
-        
-        elif method == "cab_v5":
-            # CAB V5: Three-component eviction (NEW)
+        elif method == "cab":
+            # CAB: Three-component eviction
             try:
                 from cab_attention.eviction import ThreeComponentEvictionPolicy, EvictionConfig
                 from cab_attention.scoring import FRCTracker
             except ImportError:
-                # Fallback to CAB V4 if cab_attention not available
+                # Fallback: magnitude + uniqueness
                 magnitude = key.norm(dim=-1).mean(dim=(0, 1))
                 k_norm = F.normalize(key.mean(dim=(0, 1)), dim=-1)
                 similarity = torch.mm(k_norm, k_norm.t())
@@ -537,7 +517,6 @@ Answer concisely.<|im_end|>
                 _, keep_indices = torch.topk(importance, k=num_keep, largest=True)
                 keep_indices = keep_indices.sort().values
             else:
-                # Use three-component policy
                 frc_tracker = FRCTracker(device=str(device), use_triton=False)
                 frc_scores = frc_tracker.compute_from_keys(key, force_update=True)
                 
@@ -554,15 +533,6 @@ Answer concisely.<|im_end|>
                     frc_scores=frc_scores,
                     device=str(device),
                 )
-        
-        elif method == "cab_v3":
-            # CAB V3: Pure uniqueness (FRC-based)
-            k_norm = F.normalize(key.mean(dim=(0, 1)), dim=-1)
-            similarity = torch.mm(k_norm, k_norm.t())
-            uniqueness = 1.0 - similarity.mean(dim=-1)
-            
-            _, keep_indices = torch.topk(uniqueness, k=num_keep, largest=True)
-            keep_indices = keep_indices.sort().values
         
         elif method == "local_strided":
             # Local + Strided: Keep recent + strided global
