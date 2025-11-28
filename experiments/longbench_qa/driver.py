@@ -275,7 +275,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--max-length',
         type=int,
-        default=4096,
+        default=32768,  # Support full long contexts (~30K tokens for NarrativeQA)
         help='Maximum context length in tokens',
     )
     parser.add_argument(
