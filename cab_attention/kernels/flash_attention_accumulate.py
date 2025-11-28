@@ -22,16 +22,16 @@ from typing import Optional, Tuple
 
 @triton.jit
 def _flash_attention_fwd_kernel(
-    Q, K, V,  # Input tensors [B, H, N, D]
-    Out,  # Output tensor [B, H, N, D]
-    CumulativeScores,  # Cumulative attention scores [B, H, N] - THE KEY ADDITION
+    Q, K, V,  # Input tensors: Q[B,H,N_q,D], K[B,H,N_k,D], V[B,H,N_k,D]
+    Out,  # Output tensor [B, H, N_q, D]
+    CumulativeScores,  # Cumulative attention scores [B, H, N_k] - THE KEY ADDITION
     softmax_scale,
     stride_qb, stride_qh, stride_qn, stride_qd,
     stride_kb, stride_kh, stride_kn, stride_kd,
     stride_vb, stride_vh, stride_vn, stride_vd,
     stride_ob, stride_oh, stride_on, stride_od,
     stride_cb, stride_ch, stride_cn,
-    N, D,
+    N_q, N_k, D,  # Separate query and key/value lengths for KV caching
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -59,8 +59,8 @@ def _flash_attention_fwd_kernel(
         q_offs[:, None] * stride_qn + d_offs[None, :] * stride_qd
     )
 
-    # Load Q block into SRAM
-    q_block = tl.load(q_ptrs, mask=(q_offs[:, None] < N), other=0.0)
+    # Load Q block into SRAM (use N_q for query mask)
+    q_block = tl.load(q_ptrs, mask=(q_offs[:, None] < N_q), other=0.0)
 
     # Initialize output accumulator and running statistics
     o_block = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
@@ -71,26 +71,26 @@ def _flash_attention_fwd_kernel(
     # We'll accumulate attention that these queries pay to ALL keys
     cumulative_local = tl.zeros([BLOCK_N], dtype=tl.float32)
 
-    # Iterate over K/V blocks (this is the tiling that makes Flash Attention memory-efficient)
-    num_k_blocks = tl.cdiv(N, BLOCK_N)
+    # Iterate over K/V blocks (use N_k for key/value dimension)
+    num_k_blocks = tl.cdiv(N_k, BLOCK_N)
 
     for k_block_idx in range(num_k_blocks):
         k_start = k_block_idx * BLOCK_N
         k_offs = k_start + tl.arange(0, BLOCK_N)
 
-        # Load K block [BLOCK_N, D]
+        # Load K block [BLOCK_N, D] (use N_k for key mask)
         k_ptrs = (
             K + batch_idx * stride_kb + head_idx * stride_kh +
             k_offs[:, None] * stride_kn + d_offs[None, :] * stride_kd
         )
-        k_block = tl.load(k_ptrs, mask=(k_offs[:, None] < N), other=0.0)
+        k_block = tl.load(k_ptrs, mask=(k_offs[:, None] < N_k), other=0.0)
 
-        # Load V block [BLOCK_N, D]
+        # Load V block [BLOCK_N, D] (use N_k for value mask)
         v_ptrs = (
             V + batch_idx * stride_vb + head_idx * stride_vh +
             k_offs[:, None] * stride_vn + d_offs[None, :] * stride_vd
         )
-        v_block = tl.load(v_ptrs, mask=(k_offs[:, None] < N), other=0.0)
+        v_block = tl.load(v_ptrs, mask=(k_offs[:, None] < N_k), other=0.0)
 
         # Compute attention scores for this block: QK^T [BLOCK_N, BLOCK_N]
         # This is local attention - only for this tile
@@ -132,8 +132,8 @@ def _flash_attention_fwd_kernel(
         )
 
         # Atomic add to accumulate attention across all query blocks
-        # Each key position accumulates attention from all queries
-        tl.atomic_add(cumul_ptrs, attention_received, mask=(k_offs < N))
+        # Each key position accumulates attention from all queries (use N_k)
+        tl.atomic_add(cumul_ptrs, attention_received, mask=(k_offs < N_k))
 
         # Update m_i for next iteration
         m_i = m_ij
@@ -141,12 +141,12 @@ def _flash_attention_fwd_kernel(
     # Final output normalization
     o_block = o_block / l_i[:, None]
 
-    # Write output
+    # Write output (use N_q for output mask)
     o_ptrs = (
         Out + batch_idx * stride_ob + head_idx * stride_oh +
         q_offs[:, None] * stride_on + d_offs[None, :] * stride_od
     )
-    tl.store(o_ptrs, o_block.to(Out.dtype.element_ty), mask=(q_offs[:, None] < N))
+    tl.store(o_ptrs, o_block.to(Out.dtype.element_ty), mask=(q_offs[:, None] < N_q))
 
 
 def flash_attention_with_cumulative_scores(
@@ -233,7 +233,7 @@ def flash_attention_with_cumulative_scores(
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         output.stride(0), output.stride(1), output.stride(2), output.stride(3),
         cumulative_scores.stride(0), cumulative_scores.stride(1), cumulative_scores.stride(2),
-        N_k, D,  # Pass N_k as N for kernel (size of K/V)
+        N_q, N_k, D,  # Pass both N_q and N_k for KV caching support
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
     )
