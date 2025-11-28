@@ -341,46 +341,176 @@ class FlashAttentionWithAccumulation(torch.nn.Module):
 # Utility Functions
 # =============================================================================
 
+def _create_flash_attention_forward(original_module, layer_idx: int):
+    """
+    Create a monkey-patched forward method for HuggingFace attention modules.
+
+    This wraps the original forward, intercepts Q/K/V computation, and replaces
+    the attention computation with our Flash Attention kernel.
+    """
+    # Store cumulative scores on the module itself
+    if not hasattr(original_module, '_flash_cumulative_scores'):
+        original_module._flash_cumulative_scores = None
+
+    # Get the original forward method
+    original_forward = original_module.forward
+
+    def flash_forward(
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        """
+        Flash Attention forward that matches HuggingFace Qwen2Attention signature.
+        """
+        # Get batch size and sequence length
+        bsz, q_len, _ = hidden_states.size()
+
+        # Project to Q, K, V (using original module's projection layers)
+        query_states = original_module.q_proj(hidden_states)
+        key_states = original_module.k_proj(hidden_states)
+        value_states = original_module.v_proj(hidden_states)
+
+        # Reshape for multi-head attention [B, L, H*D] -> [B, H, L, D]
+        query_states = query_states.view(bsz, q_len, original_module.num_heads, original_module.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2)
+
+        # Apply rotary position embeddings
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # Update KV cache if using past_key_values
+        if past_key_values is not None:
+            # Update cache (will expand key/value states)
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, layer_idx, cache_kwargs=None
+            )
+
+        # Handle GQA (Grouped Query Attention) by repeating K/V heads
+        if original_module.num_key_value_heads != original_module.num_heads:
+            key_states = repeat_kv(key_states, original_module.num_key_value_groups)
+            value_states = repeat_kv(value_states, original_module.num_key_value_groups)
+
+        # === FLASH ATTENTION COMPUTATION ===
+        # Replace standard attention with our Flash Attention kernel
+        attn_output, cumulative_scores = flash_attention_with_cumulative_scores(
+            query_states,  # [B, H, L, D]
+            key_states,    # [B, H, L, D]
+            value_states,  # [B, H, L, D]
+            cumulative_scores=original_module._flash_cumulative_scores,
+        )
+
+        # Store cumulative scores for eviction
+        original_module._flash_cumulative_scores = cumulative_scores
+
+        # Reshape back [B, H, L, D] -> [B, L, H*D]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, -1)
+
+        # Apply output projection
+        attn_output = original_module.o_proj(attn_output)
+
+        # Return (output, None) - no attention weights returned (saves memory!)
+        return attn_output, None
+
+    return flash_forward
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """
+    Apply rotary position embeddings to query and key tensors.
+    Compatible with HuggingFace's RoPE implementation.
+    """
+    # Reshape cos/sin to match q/k dimensions
+    cos = cos.unsqueeze(1)  # [B, 1, L, D]
+    sin = sin.unsqueeze(1)  # [B, 1, L, D]
+
+    # Apply rotation
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+
+    return q_embed, k_embed
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input (for RoPE)."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def repeat_kv(hidden_states, n_rep):
+    """
+    Repeat key/value tensors for Grouped Query Attention.
+
+    This is the same as `torch.repeat_interleave(x, dim=1, repeats=n_rep)` but faster.
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 def replace_attention_with_flash(
     model: torch.nn.Module,
     module_filter: Optional[callable] = None,
 ) -> torch.nn.Module:
     """
-    Replace all attention modules in a model with Flash Attention + accumulation.
+    Replace attention computation in HuggingFace models with Flash Attention.
+
+    Uses monkey-patching to inject Flash Attention into existing attention modules
+    without changing the module structure. This ensures compatibility with
+    HuggingFace's generation, caching, and other infrastructure.
 
     Args:
-        model: HuggingFace model
-        module_filter: Optional function to filter which modules to replace
+        model: HuggingFace model (e.g., Qwen2, Llama, etc.)
+        module_filter: Optional function to filter which modules to patch
                       e.g., lambda name, module: 'self_attn' in name
 
     Returns:
-        Modified model with Flash Attention
+        Modified model with Flash Attention (in-place modification)
 
     Example:
         >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B")
         >>> model = replace_attention_with_flash(model)
         >>> # Now model uses Flash Attention automatically
     """
-    for name, module in model.named_modules():
-        # Check if this is an attention module
-        is_attention = (
-            'attention' in name.lower() or
-            'attn' in name.lower()
-        )
+    import logging
+    logger = logging.getLogger(__name__)
 
-        if is_attention:
-            if module_filter is None or module_filter(name, module):
-                # Wrap with Flash Attention
-                parent_name = '.'.join(name.split('.')[:-1])
-                parent = model.get_submodule(parent_name) if parent_name else model
-                child_name = name.split('.')[-1]
+    patched_count = 0
 
-                wrapped = FlashAttentionWithAccumulation(
-                    module, accumulate_scores=True
-                )
-                setattr(parent, child_name, wrapped)
+    # Iterate through model layers and patch attention modules
+    for layer_idx, layer in enumerate(model.model.layers):
+        # Look for self_attn module
+        if hasattr(layer, 'self_attn'):
+            attn_module = layer.self_attn
 
-                print(f"Replaced {name} with FlashAttentionWithAccumulation")
+            # Apply filter if provided
+            module_name = f"model.layers.{layer_idx}.self_attn"
+            if module_filter is not None and not module_filter(module_name, attn_module):
+                continue
+
+            # Check if module has required attributes for our implementation
+            required_attrs = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'num_heads', 'head_dim']
+            if not all(hasattr(attn_module, attr) for attr in required_attrs):
+                logger.warning(f"Skipping {module_name}: missing required attributes")
+                continue
+
+            # Monkey-patch the forward method
+            attn_module.forward = _create_flash_attention_forward(attn_module, layer_idx)
+            logger.info(f"Patched {module_name} with Flash Attention")
+            patched_count += 1
+
+    if patched_count > 0:
+        logger.info(f"Successfully patched {patched_count} attention modules with Flash Attention")
+    else:
+        logger.warning("No attention modules were patched. Model structure may be incompatible.")
 
     return model
 
@@ -389,17 +519,35 @@ def get_all_cumulative_scores(model: torch.nn.Module) -> dict:
     """
     Extract cumulative scores from all Flash Attention layers.
 
+    Works with both:
+    1. Monkey-patched attention modules (stores scores in `_flash_cumulative_scores`)
+    2. FlashAttentionWithAccumulation wrapper modules
+
     Args:
-        model: Model with FlashAttentionWithAccumulation layers
+        model: Model with Flash Attention (patched or wrapped)
 
     Returns:
-        Dictionary mapping layer names to cumulative scores
+        Dictionary mapping layer names to cumulative scores [B, H, N]
     """
     scores = {}
-    for name, module in model.named_modules():
-        if isinstance(module, FlashAttentionWithAccumulation):
-            layer_scores = module.get_cumulative_scores()
-            if layer_scores is not None:
-                scores[name] = layer_scores
+
+    # Check for monkey-patched modules (preferred method)
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer_idx, layer in enumerate(model.model.layers):
+            if hasattr(layer, 'self_attn'):
+                attn_module = layer.self_attn
+                if hasattr(attn_module, '_flash_cumulative_scores'):
+                    layer_scores = attn_module._flash_cumulative_scores
+                    if layer_scores is not None:
+                        layer_name = f"model.layers.{layer_idx}.self_attn"
+                        scores[layer_name] = layer_scores
+
+    # Fallback: check for wrapped modules
+    if not scores:
+        for name, module in model.named_modules():
+            if isinstance(module, FlashAttentionWithAccumulation):
+                layer_scores = module.get_cumulative_scores()
+                if layer_scores is not None:
+                    scores[name] = layer_scores
 
     return scores
