@@ -420,34 +420,36 @@ class ModelWrapper:
         # Use instruction format for instruct-tuned models
         if 'instruct' in model_name or 'chat' in model_name:
             if 'mistral' in model_name:
-                # Mistral-Instruct format - question at END to avoid forgetting
-                prompt = f"""[INST] Read the context below and answer the question at the end.
+                # Mistral-Instruct format - STRICT short answer
+                prompt = f"""[INST] Read the context and answer with ONLY the exact answer - no explanations. Just 1-5 words.
 
 Context:
 {context}
 
-Based on the context above, answer this question: {question}
+Question: {question}
 
-Give only the answer, nothing else. [/INST]"""
+Answer: [/INST]"""
             elif 'llama' in model_name:
-                # Llama-2/3 Chat format
+                # Llama-2/3 Chat format - STRICT short answer
                 prompt = f"""[INST] <<SYS>>
-You are a helpful assistant. Answer questions based on the given context. Be concise.
+You are a precise QA system. Output ONLY the exact answer - no explanations, no sentences. Just the answer (1-5 words).
 <</SYS>>
 
 Context: {context}
 
-Question: {question} [/INST]"""
+Question: {question}
+
+Answer: [/INST]"""
             elif 'qwen' in model_name:
-                # Qwen format - use simple instruction
+                # Qwen format - STRICT short answer instruction
                 prompt = f"""<|im_start|>system
-You are a helpful assistant. Answer questions concisely based on the given context.<|im_end|>
+You are a precise QA system. Read the context and answer with ONLY the exact answer - no explanations, no full sentences. Just the answer word(s).<|im_end|>
 <|im_start|>user
 Context: {context}
 
 Question: {question}
 
-Answer with only the answer, nothing else.<|im_end|>
+Answer (just the answer, 1-5 words max):<|im_end|>
 <|im_start|>assistant
 """
             else:
@@ -1112,7 +1114,10 @@ class BenchmarkRunner:
                 for sparsity in self.config.sparsity_levels:
                     result_key = f"{dataset_name}_{method_name}_{sparsity}"
                     
-                    logger.info(f"\nEvaluating: {method_name} @ {sparsity:.0%} sparsity")
+                    if method_name == "dense":
+                        logger.info(f"\nEvaluating: {method_name} (full attention)")
+                    else:
+                        logger.info(f"\nEvaluating: {method_name} @ {sparsity:.0%} sparsity")
                     
                     result = self._evaluate_method(
                         dataset=dataset,
@@ -1176,10 +1181,17 @@ class BenchmarkRunner:
         
         # Use tqdm with explicit total and position for better display
         total_samples = len(dataset)
+        
+        # Build description: "dense" or "cab@90%" (don't show sparsity for dense)
+        if method_name == "dense":
+            desc = "dense"
+        else:
+            desc = f"{method_name}@{sparsity:.0%}"
+        
         pbar = tqdm(
             enumerate(dataset), 
             total=total_samples,
-            desc=f"{method_name}@{sparsity:.0%}",
+            desc=desc,
             leave=True,
             dynamic_ncols=True,
         )
@@ -1193,6 +1205,14 @@ class BenchmarkRunner:
                 if sample_results:
                     latest_f1 = result.metrics.get('f1', 0)
                     pbar.set_postfix({'f1': f'{latest_f1:.3f}', 'done': len(sample_results)})
+                
+                # Debug: Log first few samples OR when F1=0 to diagnose issues
+                if idx < 2 or (latest_f1 == 0.0 and idx < 5):
+                    pred_preview = result.prediction[:150] if result.prediction else "(empty)"
+                    ref_preview = result.references[0][:80] if result.references else "(no refs)"
+                    logger.info(f"  [DEBUG] Sample {idx}: f1={latest_f1:.3f}")
+                    logger.info(f"    Pred: '{pred_preview}'")
+                    logger.info(f"    Ref:  '{ref_preview}'")
             except Exception as e:
                 logger.warning(f"Error evaluating sample {sample.sample_id}: {e}")
                 continue
@@ -1289,7 +1309,10 @@ class BenchmarkRunner:
     
     def _log_result_summary(self, result: MethodResult) -> None:
         """Log summary of result."""
-        logger.info(f"  Results for {result.method_name} @ {result.sparsity:.0%}:")
+        if result.method_name == "dense":
+            logger.info(f"  Results for {result.method_name}:")
+        else:
+            logger.info(f"  Results for {result.method_name} @ {result.sparsity:.0%}:")
         for metric_name, stats in result.metrics.items():
             logger.info(f"    {metric_name}: {stats['mean']:.4f} ± {stats['std']:.4f}")
         logger.info(f"    Throughput: {result.samples_per_sec:.2f} samples/sec")
