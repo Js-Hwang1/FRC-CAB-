@@ -187,8 +187,8 @@ def flash_attention_with_cumulative_scores(
     B, H, N_q, D = q.shape
     _, _, N_k, _ = k.shape
 
-    assert N_q == N_k, "For now, only support N_q == N_k (can extend to cross-attention)"
-    N = N_q
+    # Support both self-attention (N_q == N_k) and KV caching (N_q < N_k)
+    # During generation: first pass N_q == N_k, subsequent passes N_q = 1, N_k = prev_len + 1
 
     # Validate inputs
     assert q.is_cuda and k.is_cuda and v.is_cuda, "All inputs must be on CUDA"
@@ -202,11 +202,15 @@ def flash_attention_with_cumulative_scores(
     # Allocate output
     output = torch.empty_like(q)
 
-    # Allocate or reset cumulative scores
+    # Allocate or reset cumulative scores (always sized to match K/V, not Q)
     if cumulative_scores is None:
-        cumulative_scores = torch.zeros(B, H, N, dtype=torch.float32, device=q.device)
+        cumulative_scores = torch.zeros(B, H, N_k, dtype=torch.float32, device=q.device)
     else:
-        assert cumulative_scores.shape == (B, H, N)
+        # Extend cumulative scores if K/V cache has grown
+        if cumulative_scores.shape[2] < N_k:
+            # Extend with zeros for new tokens
+            extension = torch.zeros(B, H, N_k - cumulative_scores.shape[2], dtype=torch.float32, device=q.device)
+            cumulative_scores = torch.cat([cumulative_scores, extension], dim=2)
         # Don't reset - we want to accumulate across multiple calls
 
     # Triton kernel configuration
@@ -214,7 +218,9 @@ def flash_attention_with_cumulative_scores(
     BLOCK_D = min(128, triton.next_power_of_2(D))
 
     # Grid configuration: parallelize over batch, heads, and query blocks
-    grid = (B, H, triton.cdiv(N, BLOCK_N))
+    # Use max(N_q, N_k) to ensure we cover all positions
+    N_max = max(N_q, N_k)
+    grid = (B, H, triton.cdiv(N_q, BLOCK_N))
 
     # Launch kernel
     _flash_attention_fwd_kernel[grid](
@@ -227,7 +233,7 @@ def flash_attention_with_cumulative_scores(
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         output.stride(0), output.stride(1), output.stride(2), output.stride(3),
         cumulative_scores.stride(0), cumulative_scores.stride(1), cumulative_scores.stride(2),
-        N, D,
+        N_k, D,  # Pass N_k as N for kernel (size of K/V)
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
     )
