@@ -247,15 +247,11 @@ class ModelWrapper:
         }
         
         # Try to use optimized attention implementations
-        # For CAB/H2O: Use SDPA with heuristic scoring (no need for eager attention)
+        # For CAB/H2O: Use eager attention to get real attention weights
         if force_eager_attention:
-            # Use SDPA for speed - heuristic scoring doesn't need attention weights
-            if TORCH_AVAILABLE and hasattr(F, 'scaled_dot_product_attention'):
-                model_kwargs['attn_implementation'] = 'sdpa'
-                logger.info("Using SDPA for CAB/H2O (heuristic-based importance scoring)")
-            else:
-                model_kwargs['attn_implementation'] = 'eager'
-                logger.info("SDPA not available, using eager attention")
+            # Use eager attention - slower but provides accurate attention weights
+            model_kwargs['attn_implementation'] = 'eager'
+            logger.info("Using eager attention for CAB/H2O (provides attention weights for accurate eviction)")
         elif self.config.use_flash_attention:
             try:
                 import flash_attn
@@ -289,14 +285,11 @@ class ModelWrapper:
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        # For CAB/H2O, use SDPA with heuristic-based importance scoring
-        # This avoids the complexity of custom Flash Attention while maintaining speed
+        # For CAB/H2O with eager attention, we'll use real attention weights (not heuristics)
         if force_eager_attention:
-            # Use SDPA (proven fast attention) instead of custom Flash Attention
-            # Importance scoring will use heuristics (key magnitudes) instead of exact attention weights
-            logger.info("Using SDPA with heuristic-based importance scoring for CAB/H2O")
+            logger.info("CAB/H2O will use real attention weights from eager attention")
             self.use_flash_attention = False
-            self.use_heuristic_scoring = True
+            self.use_heuristic_scoring = False  # Use real attention weights, not heuristics
         else:
             self.use_flash_attention = False
             self.use_heuristic_scoring = False
