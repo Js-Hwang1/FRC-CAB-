@@ -33,7 +33,20 @@ from dataclasses import dataclass, asdict
 
 # Optional dependencies with fallbacks
 try:
-    from tqdm import tqdm
+    # Try to detect notebook environment for proper tqdm
+    def _in_notebook():
+        try:
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                return True
+        except:
+            pass
+        return False
+    
+    if _in_notebook():
+        from tqdm.notebook import tqdm
+    else:
+        from tqdm import tqdm
 except ImportError:
     def tqdm(iterable, **kwargs):
         """Fallback tqdm that just returns the iterable."""
@@ -1205,6 +1218,15 @@ class BenchmarkRunner:
                 if sample_results:
                     latest_f1 = result.metrics.get('f1', 0)
                     pbar.set_postfix({'f1': f'{latest_f1:.3f}', 'done': len(sample_results)})
+                
+                # Periodic progress logging (every 10 samples) for environments where tqdm doesn't update
+                if (idx + 1) % 10 == 0 or idx == 0:
+                    avg_f1 = sum(r.metrics.get('f1', 0) for r in sample_results) / len(sample_results)
+                    elapsed = time.time() - start_time
+                    rate = (idx + 1) / elapsed if elapsed > 0 else 0
+                    eta = (total_samples - idx - 1) / rate if rate > 0 else 0
+                    print(f"  Progress: {idx+1}/{total_samples} ({100*(idx+1)/total_samples:.0f}%) | "
+                          f"Avg F1: {avg_f1:.3f} | {rate:.2f} samples/s | ETA: {eta:.0f}s", flush=True)
                 
                 # Debug: Log first few samples OR when F1=0 to diagnose issues
                 if idx < 2 or (latest_f1 == 0.0 and idx < 5):
