@@ -623,15 +623,17 @@ Answer:"""
             will_prune = ((step + 1) % 5 == 0)
             need_attention = (is_h2o or is_cab) and will_prune and not use_flash
 
-            # Pass position_ids to maintain correct RoPE after eviction
+            # Pass position_ids AND cache_position to maintain correct RoPE after eviction
             device = next_token.device
             position_ids = torch.tensor([[current_position]], device=device)
+            cache_position = torch.tensor([current_position], device=device)
 
             with torch.no_grad():
                 outputs = self.model(
                     input_ids=next_token,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
+                    cache_position=cache_position,
                     use_cache=True,
                     return_dict=True,
                     output_attentions=need_attention,  # No need if Flash Attention handles it
