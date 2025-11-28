@@ -42,8 +42,9 @@ class MethodName(str, Enum):
     """Supported sparse attention methods."""
     DENSE = "dense"                     # Full attention (oracle)
     H2O = "h2o"                         # Heavy-Hitter Oracle
-    CAB_V3 = "cab_v3"                   # Pure FRC
-    CAB_V4 = "cab_v4"                   # Hybrid (magnitude + FRC)
+    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
+    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
+    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
     STREAMING_LLM = "streaming_llm"     # Attention sinks + recent
     LOCAL_STRIDED = "local_strided"     # Local window + strided
     RANDOM = "random"                   # Random selection baseline
@@ -170,6 +171,7 @@ METHOD_CONFIGS = {
     "h2o": MethodConfig(name=MethodName.H2O, sparsity=0.9),
     "cab_v3": MethodConfig(name=MethodName.CAB_V3, sparsity=0.9, magnitude_ratio=0.0),
     "cab_v4": MethodConfig(name=MethodName.CAB_V4, sparsity=0.9, magnitude_ratio=0.5),
+    "cab_v5": MethodConfig(name=MethodName.CAB_V5, sparsity=0.9),  # Three-component eviction
     "streaming_llm": MethodConfig(name=MethodName.STREAMING_LLM, sparsity=0.9),
     "local_strided": MethodConfig(name=MethodName.LOCAL_STRIDED, sparsity=0.9),
     "random": MethodConfig(name=MethodName.RANDOM, sparsity=0.9),
@@ -244,7 +246,7 @@ class ExperimentConfig:
     dataset_configs: Dict[str, DatasetConfig] = field(default_factory=dict)
     
     # Methods to compare
-    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v4"])
+    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v5"])
     method_configs: Dict[str, MethodConfig] = field(default_factory=dict)
     
     # Sweep configurations

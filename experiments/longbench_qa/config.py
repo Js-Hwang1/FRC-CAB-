@@ -46,8 +46,9 @@ class MethodName(str, Enum):
     """Supported sparse attention methods."""
     DENSE = "dense"                     # Full attention (oracle)
     H2O = "h2o"                         # Heavy-Hitter Oracle
-    CAB_V3 = "cab_v3"                   # Pure FRC
-    CAB_V4 = "cab_v4"                   # Hybrid (magnitude + FRC)
+    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
+    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
+    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
     STREAMING_LLM = "streaming_llm"     # Attention sinks + recent
     LOCAL_STRIDED = "local_strided"     # Local window + strided
     RANDOM = "random"                   # Random selection baseline
@@ -505,6 +506,14 @@ METHOD_CONFIGS = {
         sparsity=0.9,
         magnitude_ratio=0.5,  # 50/50 hybrid
     ),
+    "cab_v5": MethodConfig(
+        name=MethodName.CAB_V5,
+        sparsity=0.9,
+        # CAB V5 uses three-component eviction:
+        # - local_ratio=0.3 (30% recent tokens)
+        # - bridge_ratio=0.2 (20% low-FRC bridges)
+        # - importance_ratio=0.5 (50% high-attention tokens)
+    ),
     "streaming_llm": MethodConfig(
         name=MethodName.STREAMING_LLM,
         sparsity=0.9,
@@ -568,7 +577,7 @@ class ExperimentConfig:
     dataset_configs: Dict[str, DatasetConfig] = field(default_factory=dict)
     
     # Methods to compare
-    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v4"])
+    methods: List[str] = field(default_factory=lambda: ["dense", "h2o", "cab_v5"])
     method_configs: Dict[str, MethodConfig] = field(default_factory=dict)
     
     # Sparsity sweep (for ablations)
@@ -700,7 +709,7 @@ def create_default_experiment(
     """Create default experiment configuration."""
     return ExperimentConfig(
         datasets=datasets or ["narrativeqa", "qasper"],
-        methods=methods or ["dense", "h2o", "cab_v4"],
+        methods=methods or ["dense", "h2o", "cab_v5"],
         sparsity_levels=sparsity_levels or [0.9],
         model=ModelConfig(name=model_name),
     )

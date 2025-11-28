@@ -11,9 +11,12 @@ Baselines:
 - StreamingLLM: Efficient Streaming LLM (Xiao et al., 2023) - arxiv:2309.17453
   Keeps "attention sinks" (first few tokens) + sliding window.
 
-Our Method:
-- CAB V4: Curvature-Aware Block-Sparse Attention
-  Hybrid importance: 50% magnitude + 50% uniqueness (FRC-based)
+Our Methods:
+- CAB V5: Curvature-Aware Block-Sparse Attention (NEW - uses CABCache)
+  Three-component eviction: local + bridge (low FRC) + importance (H2O-style)
+  
+- CAB V4: Legacy hybrid (50% magnitude + 50% uniqueness)
+  Kept for backward compatibility.
 
 Other Baselines:
 - Random: Random token selection (lower bound)
@@ -431,8 +434,13 @@ Answer:"""
         Uses EXACT published algorithms:
         - H2O: Cumulative attention scores (Zhang et al., 2023)
         - StreamingLLM: Sinks + recent window (Xiao et al., 2023)
-        - CAB V4: Hybrid magnitude + uniqueness (Ours)
+        - CAB V5: Three-component eviction with CABCache (Ours - NEW)
+        - CAB V4: Legacy hybrid magnitude + uniqueness
         """
+        # Use CAB V5 with the new CABCache
+        if method == "cab_v5":
+            return self._generate_with_cab_v5(inputs, max_new_tokens, sparsity)
+        
         device = inputs['input_ids'].device
         batch_size = inputs['input_ids'].shape[0]
         num_keep_ratio = 1.0 - sparsity
@@ -530,6 +538,61 @@ Answer:"""
                     past_key_values, num_keep_ratio, method, magnitude_ratio, 
                     uses_dynamic_cache, DynamicCache, cumulative_attention
                 )
+        
+        return generated_ids
+    
+    def _generate_with_cab_v5(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        max_new_tokens: int,
+        sparsity: float,
+    ) -> torch.Tensor:
+        """
+        Generate using CAB V5 with the new CABCache.
+        
+        CAB V5 uses three-component eviction:
+        - Local: Recent tokens (30%)
+        - Bridge: Low FRC connectors (20%)
+        - Importance: High cumulative attention (50%)
+        
+        This is more principled than CAB V4's simple magnitude + uniqueness hybrid.
+        """
+        try:
+            from cab_attention import CABCache
+            from cab_attention.integration import generate_with_cab
+        except ImportError as e:
+            logger.warning(f"CABCache not available: {e}. Falling back to CAB V4.")
+            return self._sparse_generate_legacy(inputs, max_new_tokens, "cab_v4", sparsity)
+        
+        device = inputs['input_ids'].device
+        input_len = inputs['input_ids'].shape[1]
+        
+        # Create CAB cache with appropriate size
+        max_cache_size = input_len + max_new_tokens
+        
+        cache = CABCache(
+            max_cache_size=max_cache_size,
+            sparsity=sparsity,
+            local_ratio=0.3,       # 30% local context
+            bridge_ratio=0.2,      # 20% bridge tokens
+            importance_ratio=0.5,  # 50% important tokens
+            eviction_interval=5,   # Match our pruning interval
+            device=str(device),
+        )
+        
+        # Generate using CABCache
+        generated_ids, stats = generate_with_cab(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            input_ids=inputs['input_ids'],
+            max_new_tokens=max_new_tokens,
+            cache=cache,
+            do_sample=self.config.do_sample,
+            temperature=self.config.temperature if self.config.do_sample else 1.0,
+        )
+        
+        # Log stats
+        logger.debug(f"CAB V5 stats: {stats}")
         
         return generated_ids
     

@@ -505,7 +505,7 @@ Answer concisely.<|im_end|>
             keep_indices = torch.cat([sink_indices, recent_indices])
         
         elif method == "cab_v4":
-            # CAB V4: Hybrid magnitude + uniqueness
+            # CAB V4: Hybrid magnitude + uniqueness (legacy)
             magnitude = key.norm(dim=-1).mean(dim=(0, 1))  # [N]
             
             k_norm = F.normalize(key.mean(dim=(0, 1)), dim=-1)
@@ -519,6 +519,41 @@ Answer concisely.<|im_end|>
             
             _, keep_indices = torch.topk(importance, k=num_keep, largest=True)
             keep_indices = keep_indices.sort().values
+        
+        elif method == "cab_v5":
+            # CAB V5: Three-component eviction (NEW)
+            try:
+                from cab_attention.eviction import ThreeComponentEvictionPolicy, EvictionConfig
+                from cab_attention.scoring import FRCTracker
+            except ImportError:
+                # Fallback to CAB V4 if cab_attention not available
+                magnitude = key.norm(dim=-1).mean(dim=(0, 1))
+                k_norm = F.normalize(key.mean(dim=(0, 1)), dim=-1)
+                similarity = torch.mm(k_norm, k_norm.t())
+                uniqueness = 1.0 - similarity.mean(dim=-1)
+                mag_norm = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
+                uniq_norm = (uniqueness - uniqueness.min()) / (uniqueness.max() - uniqueness.min() + 1e-8)
+                importance = 0.5 * mag_norm + 0.5 * uniq_norm
+                _, keep_indices = torch.topk(importance, k=num_keep, largest=True)
+                keep_indices = keep_indices.sort().values
+            else:
+                # Use three-component policy
+                frc_tracker = FRCTracker(device=str(device), use_triton=False)
+                frc_scores = frc_tracker.compute_from_keys(key, force_update=True)
+                
+                policy = ThreeComponentEvictionPolicy(EvictionConfig(
+                    local_ratio=0.3,
+                    bridge_ratio=0.2,
+                    importance_ratio=0.5,
+                ))
+                
+                keep_indices, _ = policy.select_indices(
+                    cache_len=N,
+                    keep_size=num_keep,
+                    importance_scores=cumulative_attention,
+                    frc_scores=frc_scores,
+                    device=str(device),
+                )
         
         elif method == "cab_v3":
             # CAB V3: Pure uniqueness (FRC-based)

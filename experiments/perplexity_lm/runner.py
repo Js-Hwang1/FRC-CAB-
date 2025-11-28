@@ -274,7 +274,7 @@ class SparsePerplexityEvaluator:
             keep_indices = torch.cat([sink_indices, recent_indices])
         
         elif self.method == "cab_v4":
-            # CAB V4: Hybrid magnitude + uniqueness (our method)
+            # CAB V4: Hybrid magnitude + uniqueness (legacy)
             keys = key_cache[0]  # [B, H, cache_len, D]
             
             # Magnitude: L2 norm
@@ -296,6 +296,41 @@ class SparsePerplexityEvaluator:
             
             _, keep_indices = torch.topk(importance, k=max_size, largest=True)
             keep_indices = keep_indices.sort().values
+        
+        elif self.method == "cab_v5":
+            # CAB V5: Three-component eviction (NEW)
+            # Uses CABCache's eviction policy: local + bridge + importance
+            try:
+                from cab_attention.eviction import ThreeComponentEvictionPolicy, EvictionConfig
+                from cab_attention.scoring import FRCTracker
+            except ImportError:
+                # Fallback to CAB V4 if cab_attention not available
+                logger.warning("cab_attention not available, falling back to CAB V4")
+                return self._prune_cab_v4_fallback(key_cache, value_cache, max_size, cache_len, device)
+            
+            keys = key_cache[0]  # [B, H, cache_len, D]
+            
+            # Compute importance (H2O-style cumulative attention)
+            importance_scores = cumulative_attention if cumulative_attention is not None else None
+            
+            # Compute FRC scores using FRCTracker
+            frc_tracker = FRCTracker(device=str(device), use_triton=False)
+            frc_scores = frc_tracker.compute_from_keys(keys, force_update=True)
+            
+            # Use three-component policy
+            policy = ThreeComponentEvictionPolicy(EvictionConfig(
+                local_ratio=0.3,
+                bridge_ratio=0.2,
+                importance_ratio=0.5,
+            ))
+            
+            keep_indices, diagnostics = policy.select_indices(
+                cache_len=cache_len,
+                keep_size=max_size,
+                importance_scores=importance_scores,
+                frc_scores=frc_scores,
+                device=str(device),
+            )
         
         else:
             # Unknown method: keep most recent

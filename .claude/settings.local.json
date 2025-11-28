@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no simple-survey-ser-ordered.trycloudflare.com \"pwd\")",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(sshpass -p '1234' scp:*)",
+      "Bash(sshpass -p '1234' ssh:*)",
+      "Bash(cat:*)",
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no exams-yen-curtis-amazing.trycloudflare.com \"cat > /root/FRC/cab_attention/cache/cab_cache.py\")",
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no exams-yen-curtis-amazing.trycloudflare.com \"cd /root/FRC && python test_fixes.py\")",
+      "Bash(sshpass -p '1234' ssh -o StrictHostKeyChecking=no exams-yen-curtis-amazing.trycloudflare.com \"cd /root/FRC && CUDA_LAUNCH_BLOCKING=1 python test_fixes.py 2>&1 | head -100\")"
     ],
     "deny": [],
     "ask": []

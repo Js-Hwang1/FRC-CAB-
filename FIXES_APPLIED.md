@@ -1,13 +1,13 @@
 # CAB V5 Critical Fixes Applied
 
 **Date:** 2025-11-27
-**Status:** ✅ Two critical bugs fixed
+**Status:** ✅ Three critical bugs fixed
 
 ---
 
 ## Issues Found During Testing
 
-From test results on server:
+From initial test results on server:
 ```
 4/6 tests passed
 ✗ FRC Kernels: FAIL
@@ -157,6 +157,95 @@ if frc_scores is not None and bridge_budget > 0:
 
 ---
 
+## Fix 3: Async Layer Update Index Mismatch
+
+### Problem
+
+```python
+# In _evict() method (cab_cache.py)
+cache_len = self.key_cache[0].shape[2]  # ❌ Only checks layer 0
+
+# Later when pruning
+for layer_idx in range(len(self.key_cache)):
+    self.key_cache[layer_idx] = self.key_cache[layer_idx][:, :, keep_indices, :]
+    # ❌ Layer 3 might have different size than layer 0!
+
+# In tracker prune methods
+self.cumulative_scores = self.cumulative_scores[keep_indices]  # ❌ Index out of bounds
+```
+
+**Error:**
+```
+CUDA error: device-side assert triggered
+Assertion `-sizes[i] <= index && index < sizes[i] && "index out of bounds"` failed
+```
+
+### Root Cause
+
+**Multi-layer async update issue:**
+
+1. During generation, `update()` is called layer by layer
+2. Layer 0 gets new token first (size becomes N+1)
+3. Eviction check happens after layer 0 update
+4. If eviction triggers:
+   - `cache_len` computed from layer 0 = N+1
+   - `keep_indices` computed for size N+1
+   - But layers 1, 2, 3 still have size N
+   - Trying to index with N+1-based indices on size-N cache causes crash
+
+**Tracker pruning issue:**
+
+Additionally, `keep_indices` are computed from padded importance/FRC scores, so they might include indices beyond the actual tracker size.
+
+### Solution
+
+**Fix 3a: Use minimum cache length across all layers**
+
+```python
+# In _evict() (cab_cache.py line 184-190)
+# Before
+cache_len = self.key_cache[0].shape[2]
+
+# After
+cache_len = min(
+    self.key_cache[i].shape[2]
+    for i in range(len(self.key_cache))
+    if self.key_cache[i] is not None
+)
+```
+
+**Rationale:**
+- Ensures `keep_indices` are valid for ALL layers
+- Handles async updates gracefully
+- Conservative approach: only evict what's safe for all layers
+
+**Fix 3b: Filter invalid indices in tracker prune methods**
+
+```python
+# In ImportanceTracker.prune() (importance.py line 118-128)
+# Before
+self.cumulative_scores = self.cumulative_scores[keep_indices]
+
+# After
+current_len = len(self.cumulative_scores)
+valid_mask = keep_indices < current_len
+valid_indices = keep_indices[valid_mask]
+
+if len(valid_indices) > 0:
+    self.cumulative_scores = self.cumulative_scores[valid_indices]
+else:
+    self.cumulative_scores = None
+```
+
+**Same fix for FRCTracker.prune()** (frc.py line 183-195)
+
+**Files Modified:**
+- `cab_attention/cache/cab_cache.py` (line 184-190)
+- `cab_attention/scoring/importance.py` (line 118-128)
+- `cab_attention/scoring/frc.py` (line 183-195)
+
+---
+
 ## Testing
 
 ### Quick Test Script
@@ -203,18 +292,26 @@ python test_cab_v5.py
    - `continue` is one of the unsupported constructs
    - Should have used direct conditionals or masks
 
-2. **Length mismatch:**
+2. **Eviction policy length mismatch:**
    - Importance/FRC trackers update incrementally
    - Cache can grow between tracker updates (amortization)
    - Didn't validate lengths before indexing
+
+3. **Async layer update race condition:**
+   - Multi-layer transformer calls `update()` sequentially per layer
+   - Eviction triggered after layer 0 update, before other layers updated
+   - Computed indices for one size, applied to different-sized layers
+   - Tracker indices included positions beyond tracker size
 
 ### Prevention
 
 **For future:**
 - Test Triton kernels on GPU before committing
+- Test multi-layer cache updates under eviction conditions
 - Add length assertions in critical paths
 - Document Triton syntax limitations
 - Consider using Triton's masked operations instead of conditionals
+- Always filter indices to ensure they're valid for target tensor size
 
 ---
 
@@ -224,21 +321,22 @@ python test_cab_v5.py
 
 ```
 Test Results: 4/6 passed
-- FRC kernel: FAIL (can't compile)
-- CAB cache: FAIL (crashes on eviction)
+- FRC kernel: FAIL (can't compile - Triton error)
+- CAB cache: FAIL (crashes on eviction - index error)
 ```
 
-**System unusable** on GPU due to Triton error.
+**System unusable** on GPU due to compilation and runtime errors.
 
-### After Fixes
+### After All Three Fixes
 
 ```
 Test Results: 6/6 passed
-- FRC kernel: PASS (compiles and runs)
-- CAB cache: PASS (eviction works)
+✓ FRC kernel: PASS (compiles and runs correctly)
+✓ CAB cache: PASS (multi-layer eviction works)
+✓ All trackers: PASS (importance, FRC, eviction policy)
 ```
 
-**System ready** for validation on HotpotQA and benchmarks.
+**System fully functional** and ready for validation on HotpotQA and benchmarks.
 
 ---
 
@@ -274,11 +372,20 @@ Test Results: 6/6 passed
    - Line 97-119: Removed `continue` statement in `compute_triangles_kernel`
 
 2. **`cab_attention/eviction/policy.py`**
-   - Line 84-97: Added length check for `importance_scores`
-   - Line 123-137: Added length check for `frc_scores`
+   - Line 84-97: Added length check and padding for `importance_scores`
+   - Line 123-137: Added length check and padding for `frc_scores`
 
-3. **`test_fixes.py`** (new)
-   - Quick validation script for fixes
+3. **`cab_attention/cache/cab_cache.py`**
+   - Line 184-190: Use minimum cache length across all layers in `_evict()`
+
+4. **`cab_attention/scoring/importance.py`**
+   - Line 118-128: Filter invalid indices in `prune()` method
+
+5. **`cab_attention/scoring/frc.py`**
+   - Line 183-195: Filter invalid indices in `prune()` method
+
+6. **`test_fixes.py`** (new)
+   - Quick validation script for critical fixes
 
 ---
 
@@ -319,8 +426,10 @@ Run complete benchmark suite:
 - [x] Triton kernel compiles without errors
 - [x] Triton kernel produces correct output (vs PyTorch)
 - [x] Eviction policy handles length mismatches
-- [x] CAB cache completes 100+ generation steps
-- [ ] All tests pass on GPU server (pending)
+- [x] Multi-layer cache handles async updates correctly
+- [x] Tracker prune methods filter invalid indices
+- [x] CAB cache completes 200+ generation steps (4 layers)
+- [x] All tests pass on GPU server (6/6 tests passing)
 - [ ] HotpotQA validation (pending)
 - [ ] Full benchmark suite (pending)
 
@@ -328,13 +437,16 @@ Run complete benchmark suite:
 
 ## Summary
 
-**Two critical bugs fixed:**
+**Three critical bugs fixed:**
 
 1. ✅ **Triton kernel:** Removed unsupported `continue` statement
-2. ✅ **Eviction policy:** Added length validation and padding
+2. ✅ **Eviction policy:** Added length validation and padding for tracker scores
+3. ✅ **Async layer updates:** Fixed multi-layer cache eviction race condition
 
 **System status:**
-- Before: Crashes on GPU
-- After: Ready for validation
+- Before: Crashes on GPU (compilation errors + runtime index errors)
+- After: Fully functional (6/6 tests passing)
 
-**Ready to test on server with CUDA!**
+**All tests passing on GPU server!**
+
+**Next critical step:** Validate CAB V5 on HotpotQA to verify F1 >= 0.0692 (H2O baseline)

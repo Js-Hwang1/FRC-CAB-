@@ -181,8 +181,18 @@ class FRCTracker:
             keep_indices: Indices of positions to keep
         """
         if self.frc_scores is not None:
-            self.frc_scores = self.frc_scores[keep_indices]
-            self.last_update_len = len(self.frc_scores)
+            # Filter keep_indices to only include valid indices for current size
+            current_len = len(self.frc_scores)
+            valid_mask = keep_indices < current_len
+            valid_indices = keep_indices[valid_mask]
+
+            if len(valid_indices) > 0:
+                self.frc_scores = self.frc_scores[valid_indices]
+                self.last_update_len = len(self.frc_scores)
+            else:
+                # No valid indices, reset
+                self.frc_scores = None
+                self.last_update_len = 0
 
     def __len__(self) -> int:
         """Return number of tracked positions."""

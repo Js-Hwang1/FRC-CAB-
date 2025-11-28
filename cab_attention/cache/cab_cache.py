@@ -181,8 +181,13 @@ class CABCache:
         if len(self.key_cache) == 0 or self.key_cache[0] is None:
             return
 
-        # Get cache length from first layer
-        cache_len = self.key_cache[0].shape[2]
+        # Get minimum cache length across all layers
+        # This ensures indices are valid for all layers (handles async updates)
+        cache_len = min(
+            self.key_cache[i].shape[2]
+            for i in range(len(self.key_cache))
+            if self.key_cache[i] is not None
+        )
 
         # Compute target size
         keep_ratio = 1.0 - self.config.sparsity

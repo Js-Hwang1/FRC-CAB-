@@ -55,8 +55,9 @@ class MethodName(Enum):
     """Sparse attention methods."""
     DENSE = "dense"
     H2O = "h2o"
-    CAB_V3 = "cab_v3"
-    CAB_V4 = "cab_v4"
+    CAB_V3 = "cab_v3"                   # Pure FRC (legacy)
+    CAB_V4 = "cab_v4"                   # Hybrid magnitude + FRC (legacy)
+    CAB_V5 = "cab_v5"                   # Three-component: local + bridge + importance (NEW)
     STREAMING_LLM = "streaming_llm"
     LOCAL_STRIDED = "local_strided"
     RANDOM = "random"
@@ -170,7 +171,7 @@ class ExperimentConfig:
             self.datasets = ["cnn_dailymail"]
         
         if not self.methods:
-            self.methods = ["dense", "h2o", "cab_v4"]
+            self.methods = ["dense", "h2o", "cab_v5"]
         
         # Validate datasets
         for ds_name in self.datasets:
@@ -387,6 +388,12 @@ METHOD_CONFIGS: Dict[str, MethodConfig] = {
         name=MethodName.CAB_V4,
         sparsity=0.9,
         magnitude_ratio=0.5,  # 50% magnitude, 50% FRC
+    ),
+    
+    "cab_v5": MethodConfig(
+        name=MethodName.CAB_V5,
+        sparsity=0.9,
+        # Three-component eviction: local + bridge + importance
     ),
     
     "streaming_llm": MethodConfig(

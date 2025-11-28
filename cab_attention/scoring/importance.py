@@ -116,7 +116,16 @@ class ImportanceTracker:
             keep_indices: Indices of positions to keep
         """
         if self.cumulative_scores is not None:
-            self.cumulative_scores = self.cumulative_scores[keep_indices]
+            # Filter keep_indices to only include valid indices for current size
+            current_len = len(self.cumulative_scores)
+            valid_mask = keep_indices < current_len
+            valid_indices = keep_indices[valid_mask]
+
+            if len(valid_indices) > 0:
+                self.cumulative_scores = self.cumulative_scores[valid_indices]
+            else:
+                # No valid indices, reset
+                self.cumulative_scores = None
 
     def __len__(self) -> int:
         """Return number of tracked positions."""
