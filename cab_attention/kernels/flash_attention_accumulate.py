@@ -496,11 +496,20 @@ def replace_attention_with_flash(
             if module_filter is not None and not module_filter(module_name, attn_module):
                 continue
 
-            # Check if module has required attributes for our implementation
-            required_attrs = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'num_heads', 'head_dim']
-            if not all(hasattr(attn_module, attr) for attr in required_attrs):
-                logger.warning(f"Skipping {module_name}: missing required attributes")
+            # Check required attributes (handle both Llama and Qwen2 style)
+            required_base = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'head_dim']
+            if not all(hasattr(attn_module, attr) for attr in required_base):
+                logger.warning(f"Skipping {module_name}: missing required base attributes")
                 continue
+
+            # Handle num_heads (Llama) vs config.num_attention_heads (Qwen2)
+            if not hasattr(attn_module, 'num_heads'):
+                if hasattr(attn_module, 'config') and hasattr(attn_module.config, 'num_attention_heads'):
+                    # Qwen2 style: add num_heads from config
+                    attn_module.num_heads = attn_module.config.num_attention_heads
+                else:
+                    logger.warning(f"Skipping {module_name}: cannot determine num_heads")
+                    continue
 
             # Monkey-patch the forward method
             attn_module.forward = _create_flash_attention_forward(attn_module, layer_idx)
