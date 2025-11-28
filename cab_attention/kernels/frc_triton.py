@@ -99,9 +99,6 @@ def compute_triangles_kernel(
         # w_ij
         w_ij = tl.load(attention_ptr + row_i_offset + j)
 
-        if w_ij == 0.0:
-            continue
-
         # Load row j (for w_jk)
         row_j_offset = j * N
 
@@ -118,6 +115,7 @@ def compute_triangles_kernel(
             )
 
             # Add w_ij * w_jk (weighted triangles)
+            # If w_ij is 0, product will be 0 anyway
             triangle_count += tl.sum(w_ij * w_jk)
 
     # Store result

@@ -81,6 +81,21 @@ class ThreeComponentEvictionPolicy:
 
         # Component 2: Important tokens (highest cumulative attention)
         if importance_scores is not None and importance_budget > 0:
+            # Ensure importance_scores matches cache_len
+            if len(importance_scores) != cache_len:
+                # Pad or truncate to match cache_len
+                if len(importance_scores) < cache_len:
+                    # Pad with zeros
+                    padding = torch.zeros(
+                        cache_len - len(importance_scores),
+                        device=device,
+                        dtype=importance_scores.dtype
+                    )
+                    importance_scores = torch.cat([importance_scores, padding])
+                else:
+                    # Truncate
+                    importance_scores = importance_scores[:cache_len]
+
             # Mask out already-selected indices
             candidate_scores = importance_scores.clone()
             candidate_scores[selected_mask] = -float('inf')
@@ -105,6 +120,22 @@ class ThreeComponentEvictionPolicy:
 
         # Component 3: Bridge tokens (LOWEST FRC)
         if frc_scores is not None and bridge_budget > 0:
+            # Ensure frc_scores matches cache_len
+            if len(frc_scores) != cache_len:
+                # Pad or truncate to match cache_len
+                if len(frc_scores) < cache_len:
+                    # Pad with high values (so they won't be selected as bridges)
+                    padding = torch.full(
+                        (cache_len - len(frc_scores),),
+                        float('inf'),
+                        device=device,
+                        dtype=frc_scores.dtype
+                    )
+                    frc_scores = torch.cat([frc_scores, padding])
+                else:
+                    # Truncate
+                    frc_scores = frc_scores[:cache_len]
+
             # Mask out already-selected indices
             candidate_frc = frc_scores.clone()
             candidate_frc[selected_mask] = float('inf')
