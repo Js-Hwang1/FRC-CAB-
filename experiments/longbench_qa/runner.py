@@ -669,13 +669,18 @@ Answer:"""
         
         # Check cache type and prune accordingly
         uses_dynamic_cache = has_dynamic_cache and isinstance(past_key_values, DynamicCache)
-        
-        # Prune initial KV cache
+
+        # Prune initial KV cache (apply sparsity ONCE)
         past_key_values, kept_indices, cumulative_attention = self._prune_kv_cache_v3(
-            past_key_values, num_keep_ratio, method, magnitude_ratio, 
+            past_key_values, num_keep_ratio, method, magnitude_ratio,
             uses_dynamic_cache, DynamicCache, cumulative_attention
         )
-        
+
+        # Store target cache size (maintain this during generation)
+        initial_cache_size = past_key_values[0][0].shape[2]  # [B, H, N, D] -> N
+        target_cache_size = initial_cache_size
+        logger.info(f"[DEBUG] Target cache size: {target_cache_size} tokens (from {inputs['input_ids'].shape[1]} input tokens)")
+
         # Generate tokens one by one
         generated_ids = inputs['input_ids'].clone()
         
@@ -747,11 +752,22 @@ Answer:"""
             
             # Prune cache periodically (every 5 tokens to balance speed/sparsity)
             if will_prune:
-                uses_dynamic_cache = has_dynamic_cache and isinstance(past_key_values, DynamicCache)
-                past_key_values, kept_indices, cumulative_attention = self._prune_kv_cache_v3(
-                    past_key_values, num_keep_ratio, method, magnitude_ratio, 
-                    uses_dynamic_cache, DynamicCache, cumulative_attention
-                )
+                current_cache_size = past_key_values[0][0].shape[2]
+                # Only prune if cache exceeds target size
+                if current_cache_size > target_cache_size:
+                    # Calculate keep ratio to return to target size
+                    # We want to keep target_cache_size tokens out of current_cache_size
+                    dynamic_keep_ratio = target_cache_size / current_cache_size
+                    logger.info(f"[DEBUG] Cache grew to {current_cache_size}, pruning to {target_cache_size} "
+                               f"(keep_ratio={dynamic_keep_ratio:.3f})")
+
+                    uses_dynamic_cache = has_dynamic_cache and isinstance(past_key_values, DynamicCache)
+                    past_key_values, kept_indices, cumulative_attention = self._prune_kv_cache_v3(
+                        past_key_values, dynamic_keep_ratio, method, magnitude_ratio,
+                        uses_dynamic_cache, DynamicCache, cumulative_attention
+                    )
+                else:
+                    logger.info(f"[DEBUG] Cache size {current_cache_size} within target {target_cache_size}, skipping prune")
         
         return generated_ids
     
