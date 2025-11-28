@@ -580,6 +580,9 @@ Answer:"""
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
 
+        # Track current position for RoPE after eviction
+        current_position = inputs['input_ids'].shape[1]
+
         # H2O/CAB: Initialize cumulative attention from first pass
         if (is_h2o or is_cab):
             if use_flash:
@@ -620,14 +623,22 @@ Answer:"""
             will_prune = ((step + 1) % 5 == 0)
             need_attention = (is_h2o or is_cab) and will_prune and not use_flash
 
+            # Pass position_ids to maintain correct RoPE after eviction
+            device = next_token.device
+            position_ids = torch.tensor([[current_position]], device=device)
+
             with torch.no_grad():
                 outputs = self.model(
                     input_ids=next_token,
                     past_key_values=past_key_values,
+                    position_ids=position_ids,
                     use_cache=True,
                     return_dict=True,
                     output_attentions=need_attention,  # No need if Flash Attention handles it
                 )
+
+            # Increment position for next token (regardless of eviction)
+            current_position += 1
 
             past_key_values = outputs.past_key_values
             next_token_logits = outputs.logits[:, -1, :]
