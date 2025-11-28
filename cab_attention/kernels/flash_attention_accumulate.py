@@ -375,9 +375,9 @@ def _create_flash_attention_forward(original_module, layer_idx: int):
         value_states = original_module.v_proj(hidden_states)
 
         # Reshape for multi-head attention [B, L, H*D] -> [B, H, L, D]
-        query_states = query_states.view(bsz, q_len, original_module.num_heads, original_module.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, original_module.num_heads, original_module.head_dim).transpose(1, 2).contiguous()
+        key_states = key_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2).contiguous()
+        value_states = value_states.view(bsz, q_len, original_module.num_key_value_heads, original_module.head_dim).transpose(1, 2).contiguous()
 
         # Apply rotary position embeddings
         cos, sin = position_embeddings
