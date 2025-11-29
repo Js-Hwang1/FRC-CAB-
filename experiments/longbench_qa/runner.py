@@ -966,11 +966,13 @@ Answer:"""
             if cumulative_attention is not None and len(cumulative_attention) >= N:
                 from cab_attention.eviction import ThreeComponentEvictionPolicy, EvictionConfig
 
-                # Create eviction policy (same configuration as CABCache)
+                # Create eviction policy optimized for QA tasks
+                # QA needs to preserve question tokens (at end) and answer-relevant context
+                # Increased local_ratio to keep full question, reduced importance to avoid generic tokens
                 config = EvictionConfig(
-                    local_ratio=0.3,
-                    bridge_ratio=0.2,
-                    importance_ratio=0.5,
+                    local_ratio=0.7,     # Keep 70% from recent tokens (includes full question)
+                    bridge_ratio=0.1,    # Keep 10% median-importance connectors
+                    importance_ratio=0.2, # Keep 20% highest-attention context facts
                 )
                 policy = ThreeComponentEvictionPolicy(config)
 
