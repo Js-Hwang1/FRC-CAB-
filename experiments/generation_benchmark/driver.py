@@ -398,12 +398,45 @@ class GenerationBenchmark:
                     # Concatenate context + target tokens up to position i
                     input_ids = torch.cat([context_ids, target_ids[:, :i+1]], dim=1)
 
-                    # Prune if needed
+                    # Apply eviction policies if needed
                     if method != 'dense' and input_ids.shape[1] > int(1024 * keep_ratio):
-                        # For methods with eviction, truncate to simulate cache pruning
-                        # Keep most recent tokens
-                        max_len = int(1024 * keep_ratio)
-                        input_ids = input_ids[:, -max_len:]
+                        keep_size = int(1024 * keep_ratio)
+                        cache_len = input_ids.shape[1]
+
+                        # Get importance scores from Flash Attention
+                        importance_scores = self._get_flash_cumulative_scores()
+
+                        if importance_scores is not None:
+                            # Ensure scores are on correct device and have correct shape
+                            if importance_scores.device != self.device:
+                                importance_scores = importance_scores.to(self.device)
+                            if len(importance_scores.shape) > 1:
+                                # Average across heads if needed
+                                importance_scores = importance_scores.mean(dim=0)
+                            if len(importance_scores) > cache_len:
+                                importance_scores = importance_scores[:cache_len]
+
+                            if method == 'h2o':
+                                # H2O: 20% recent + 80% important
+                                from cab_attention.eviction.h2o import h2o_select_indices
+                                keep_indices, _ = h2o_select_indices(
+                                    cache_len, keep_size, importance_scores,
+                                    local_ratio=0.2, device=self.device
+                                )
+                            elif method == 'cab':
+                                # CAB: 30% local + 20% bridges + 50% important
+                                from cab_attention.eviction.policy import ThreeComponentEvictionPolicy, EvictionConfig
+                                policy = ThreeComponentEvictionPolicy(EvictionConfig())
+                                keep_indices, _ = policy.select_indices(
+                                    cache_len, keep_size, importance_scores,
+                                    device=self.device
+                                )
+
+                            # Only keep selected tokens
+                            input_ids = input_ids[:, keep_indices]
+                        else:
+                            # Fallback to simple truncation if no scores available
+                            input_ids = input_ids[:, -keep_size:]
 
                     # Forward pass
                     outputs = self.model(
